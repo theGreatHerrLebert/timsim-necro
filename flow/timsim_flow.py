@@ -368,6 +368,22 @@ SAGE = os.environ.get("TIMSIM_SAGE", "/home/administrator/Documents/promotion/ru
 SAGE_CONFIG = os.environ.get("TIMSIM_SAGE_CONFIG", "/scratch/timsim-demo/SAGEBench/configs/sage-smoke.json")
 
 
+def render_noise_flags(cfg) -> str:
+    """A1 signal-m/z noise CLI (`timsim-render`), rendered as a suffix appended to the render command.
+    Returns "" when noise is off so the command — and thus the necroflow fingerprint — is byte-identical
+    to a noiseless run (existing caches stay valid). A nonzero precursor OR fragment ppm turns it on;
+    ppm is v1's 3σ envelope (`--noise-mz-ppm 6.5` == v1's real DIA config). See REALISM_PLAN.md."""
+    mz = getattr(cfg, "noise_mz_ppm", 0.0)
+    frag = getattr(cfg, "noise_frag_ppm", 0.0)
+    if not mz and not frag:
+        return ""
+    parts = [f"--noise-mz-ppm {mz}", f"--noise-frag-ppm {frag}",
+             f"--noise-seed {getattr(cfg, 'noise_seed', 0)}"]
+    if getattr(cfg, "noise_mz_uniform", False):
+        parts.append("--noise-mz-uniform")
+    return " " + " ".join(parts)
+
+
 @r.command(f"{BIN}/timsim-proteome --spec {{spec}} --out {{proteome}}")
 def proteome(spec: str):
     """FASTAs -> proteins. STRUCTURE.
@@ -595,7 +611,7 @@ def render_thermo(
     f"{BIN}/timsim-render --precursors {{precursors}} --peptide-rt {{peptide_rt}} "
     "--ion-spectra {ion_spectra} --precursor-ccs {precursor_ccs} "
     "--peptide-quantities {peptide_quantities} --sample {sample_id} "
-    "--reference-d {reference_d} --dia --intensity-scale {intensity_scale} "
+    "--reference-d {reference_d} --dia --intensity-scale {intensity_scale}{noise_flags} "
     "--out {raw} --truth {truth}",
     threads=2,
     ram="8Gi",
@@ -609,6 +625,7 @@ def render(
     reference_d: str,
     sample_id: str,
     intensity_scale: float,
+    noise_flags: str = "",
 ):
     """MEASUREMENT (Bruker, ion-mobility): the lean v2 projector authors a Bruker `.d` by placing the
     instrument-independent `ion_spectra` onto the reference `.d`'s DIA grid — imspy-free, streaming,
@@ -1021,6 +1038,7 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
         reference_d=cfg.reference_d,
         sample_id=sample_id,
         intensity_scale=cfg.intensity_scale,
+        noise_flags=render_noise_flags(cfg),
     )
     # ── phase 2 (opt-in): DiaNN-search the .d natively + score against the answer key ──
     if getattr(cfg, "search_fasta", None):
@@ -1192,6 +1210,15 @@ def main() -> None:
     ap.add_argument("--frag-model", default="", help="fragment model: '' (local timsTOF) or 'koina:Prosit_2020_intensity_HCD'")
     ap.add_argument("--collision-energy", type=float, default=25.0)
     ap.add_argument("--intensity-scale", type=float, default=5.0e5)
+    # A1 signal-m/z noise (Bruker DIA render). ppm is v1's 3σ envelope; 6.5 == v1's real DIA config.
+    # 0/0 (default) keeps the render byte-identical to the noiseless baseline. See REALISM_PLAN.md.
+    ap.add_argument("--noise-mz-ppm", type=float, default=0.0,
+                    help="A1: Gaussian m/z scatter on precursor (MS1) peaks, ppm 3σ envelope (v1 6.5). 0=off")
+    ap.add_argument("--noise-frag-ppm", type=float, default=0.0,
+                    help="A1: m/z scatter on fragment (MS2) peaks, ppm 3σ envelope. 0=off")
+    ap.add_argument("--noise-mz-uniform", action="store_true",
+                    help="A1: use v1's uniform m/z scatter (mz ± mz·ppm/1e6) instead of the default Gaussian")
+    ap.add_argument("--noise-seed", type=int, default=0, help="A1: seed for the (deterministic) noise draws")
     ap.add_argument("--search-fasta", default=None,
                     help="opt into phase 2: DiaNN-search the rendered .raw against this FASTA, then score "
                          "against the answer key. Omit to stop at the .raw.")
@@ -1216,6 +1243,10 @@ def main() -> None:
         frag_model=a.frag_model,
         collision_energy=a.collision_energy,
         intensity_scale=a.intensity_scale,
+        noise_mz_ppm=a.noise_mz_ppm,
+        noise_frag_ppm=a.noise_frag_ppm,
+        noise_mz_uniform=a.noise_mz_uniform,
+        noise_seed=a.noise_seed,
         search_fasta=a.search_fasta,
         qvalue=a.qvalue,
         search_threads=a.search_threads,
