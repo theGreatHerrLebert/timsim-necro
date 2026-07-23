@@ -69,8 +69,13 @@ python flow/timsim_flow.py --help         # drive the DAG
   DAG appends `search_bruker` (DiaNN reads the `.d` **natively** — no .NET) + `score_bruker`, so Bruker
   closes structure → render → search → score just like Thermo. Verified end-to-end: a 60-protein run
   authors a valid 3000-frame DIA `.d` (177 MS1 + 2823 MS2), a 42,919-row truth, DiaNN searches it as
-  Slice-PASEF, and the scorer reports a monotonic recall-by-abundance ladder. The default Bruker path
-  (no flag) still uses the v1 `timsim` monolith (imspy) because it owns **DDA**; lean v2 covers DIA.
+  Slice-PASEF, and the scorer reports a monotonic recall-by-abundance ladder.
+- **Bruker DDA-PASEF `.d`** (`--bruker-dda <ref.d>`) — **lean v2**: same feature-space chain + CCS →
+  `timsim-render --dda` (MS1 surveys + top-N precursor selection with dynamic exclusion + band-limited MS2),
+  co-emitting a per-**selection-event** answer key. Searched by **Sage** (not DiaNN — which is DIA-only):
+  `search_dda` (Sage reads the `.d` natively) + `score_dda` (`v2_dda_eval` maps Sage's PSMs to the
+  fragmented precursors; recall is *conditional* on the top-N DDA selected). Verified end-to-end: 6,557
+  correct PSMs, FDP 0.17%.
 - **SCIEX mzML** (`--sciex`) — **lean v2**: the same feature-space chain → `timsim-render-sciex`, which
   projects onto a **synthesised SWATH schedule** and writes open **mzML** via `timsim-core` (mzdata) — no
   `.wiff`, no `sciexwiff`/`sciex-io` (legally clean). Co-emits the answer key; with `--search-fasta` the
@@ -79,9 +84,10 @@ python flow/timsim_flow.py --help         # drive the DAG
   84.4% detectable recall, FDP 0.81%, monotonic ladder — on par with Thermo. (Native `.wiff` output is a
   separate rustims-local satellite reusing the validated `sciexwiff` writer.)
 
-**Thermo, Bruker DIA, and SCIEX all close structure → render → search → score** on small,
-independently-versioned federated repos — zero imspy, zero rustims. The one remaining v1 touchpoint is
-**Bruker DDA** (the v2 render has a DDA mode, but the default Bruker path is still the monolith).
+**Thermo, Bruker DIA, Bruker DDA, and SCIEX all close structure → render → search → score** on small,
+independently-versioned federated repos — zero imspy, zero rustims. The one remaining v1 cord is the
+**native SCIEX `.wiff`** writer (a rustims-local satellite by design, since `sciexwiff` is legal-held; the
+open **mzML** SCIEX path is fully lean).
 
 ## Layout
 ```
