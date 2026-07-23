@@ -1,0 +1,10 @@
+# timsim-necro ingests ONLY the lean simulator pieces — no imspy monorepo.
+#
+# Orchestration framework (the typed DAG):
+necroflow @ git+https://github.com/MatteoLacki/necroflow
+#
+# Prediction jobs (timsim-ccs / timsim-rt / timsim-fragments) — the pipeline's measurement step.
+# Pulls pepdl -> mscorepy (mscore+ms-chem pyo3 primitives). Fully imspy-free.
+#   [local]  = torch + Chronologer (default RT) + the local intensity model (on-device)
+#   [koina]  = koinapy (remote prediction, torch-free)
+timsim-predict[local,koina] @ git+https://github.com/theGreatHerrLebert/timsim-predict
