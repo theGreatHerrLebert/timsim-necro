@@ -8,3 +8,7 @@ necroflow @ git+https://github.com/MatteoLacki/necroflow
 #   [local]  = torch + Chronologer (default RT) + the local intensity model (on-device)
 #   [koina]  = koinapy (remote prediction, torch-free)
 timsim-predict[local,koina] @ git+https://github.com/theGreatHerrLebert/timsim-predict
+#
+# Evaluation / validation harness (the SCORE node): parse the DiaNN report, compare to the render's
+# ground-truth manifest, emit metrics. Pure-Python (pandas/numpy/scipy/matplotlib), imspy-free.
+timsim-eval @ git+https://github.com/theGreatHerrLebert/timsim-eval

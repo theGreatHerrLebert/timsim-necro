@@ -564,7 +564,7 @@ def search(
 
 
 @r.command(
-    "python -m imspy_simulation.timsim.validate.v2_thermo_eval "
+    "python -m timsim_eval.v2_thermo_eval "
     "--report {diann}/report.parquet --truth {truth} --peptides {peptides} "
     "--fdr {qvalue} --out {metrics}"
 )

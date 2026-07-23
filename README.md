@@ -23,6 +23,7 @@ necroflow (typed DAG framework)                         ← orchestration
 │                                   └─ timsim-predict → pepdl → mscorepy
 │                                      (mscore + ms-chem pyo3 primitives; imspy-free)
 │ search (external):             DiaNN
+│ score (Python, LEAN):          timsim-eval (parse report → compare to truth → metrics)
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -54,9 +55,12 @@ python flow/timsim_flow.py --help         # drive the DAG
 - **Rust protocol/render tools** — [`timsim-cli`](https://github.com/theGreatHerrLebert/timsim-cli), its own
   repo, `cargo install --git`-able, depending only on published crates. **No rustims.**
 
-**One honest gap left**
-- The **eval/validation step** (`imspy_simulation.timsim.validate.v2_thermo_eval`, a single DAG node) still
-  imports `imspy-simulation`. It's benchmarking, separate from the core simulation — the last imspy touchpoint.
+- **Eval / validation** — [`timsim-eval`](https://github.com/theGreatHerrLebert/timsim-eval), its own repo.
+  The SCORE node (`timsim_eval.v2_thermo_eval`) parses the DiaNN report and compares it to the render's
+  ground-truth manifest. Pure-Python, **imspy-free** on the DiaNN path — the last imspy touchpoint is cut.
+
+**No gaps left** — the entire DAG (structure → prediction → render → search → score) ingests only small,
+independently-versioned federated repos. Zero imspy, zero rustims monorepo.
 
 ## Layout
 ```
