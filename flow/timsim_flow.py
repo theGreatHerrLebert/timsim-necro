@@ -354,12 +354,16 @@ def proteome(spec: str):
 @r.command(
     f"{BIN}/timsim-digest --proteome {{proteome}} "
     "--out-peptides {peptides} --out-occurrences {occurrences} --out-cleavage-sites {cleavage_sites} "
-    "--max-missed-cleavages {max_missed_cleavages} --min-length {min_length} --max-length {max_length}"
+    "--max-missed-cleavages {max_missed_cleavages} --min-length {min_length} --max-length {max_length} "
+    "--max-peptides {max_peptides} --seed {seed}"
 )
-def digest(proteome: Proteome, max_missed_cleavages: int, min_length: int, max_length: int):
+def digest(proteome: Proteome, max_missed_cleavages: int, min_length: int, max_length: int,
+           max_peptides: int, seed: int):
     """Proteins -> peptides. STRUCTURE, so it is computed once for every sample in the design.
 
     Three co-outputs of one call: they are one computation and necroflow treats them as such.
+    `max_peptides=0` keeps the full analytic digest; a positive value samples that many (seeded) for a
+    tractable run on a large proteome while keeping the full FASTA as the search space.
     """
     return Peptides[peptides], Occurrences[occurrences], CleavageSites[cleavage_sites]
 
@@ -762,6 +766,8 @@ def timsim_pipeline(cfg, sample_id: str) -> Pipeline:
         max_missed_cleavages=cfg.max_missed_cleavages,
         min_length=cfg.min_length,
         max_length=cfg.max_length,
+        max_peptides=cfg.max_peptides,
+        seed=cfg.seed,
     )
 
     P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
@@ -820,6 +826,8 @@ def timsim_thermo_pipeline(cfg, sample_id: str) -> Pipeline:
         max_missed_cleavages=cfg.max_missed_cleavages,
         min_length=cfg.min_length,
         max_length=cfg.max_length,
+        max_peptides=cfg.max_peptides,
+        seed=cfg.seed,
     )
     P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
     P.precursors = r.precursors(P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
@@ -886,6 +894,8 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
         max_missed_cleavages=cfg.max_missed_cleavages,
         min_length=cfg.min_length,
         max_length=cfg.max_length,
+        max_peptides=cfg.max_peptides,
+        seed=cfg.seed,
     )
     P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
     P.precursors = r.precursors(P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
@@ -949,6 +959,8 @@ def timsim_sciex_pipeline(cfg, sample_id: str) -> Pipeline:
         max_missed_cleavages=cfg.max_missed_cleavages,
         min_length=cfg.min_length,
         max_length=cfg.max_length,
+        max_peptides=cfg.max_peptides,
+        seed=cfg.seed,
     )
     P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
     P.precursors = r.precursors(P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
@@ -1007,6 +1019,9 @@ def main() -> None:
     ap.add_argument("--mods", default="mods.toml", help="modification spec (e.g. mods_basic.toml for a light HeLa run)")
     ap.add_argument("--design-spec", default="design.toml", help="experiment design spec (e.g. design_hela.toml for a single-organism run)")
     ap.add_argument("--samples", nargs="+", default=["A_R1", "B_R1"])
+    ap.add_argument("--max-peptides", type=int, default=0,
+                    help="cap the simulated peptides to this many (seeded sample; 0 = full analytic digest). "
+                         "Keeps the full FASTA as the DiaNN search space — for a tractable run on a big proteome.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--graph", help="write the DAG to this file")
     ap.add_argument("--thermo-template", help="build the Thermo .raw pipeline against this template")
@@ -1034,6 +1049,7 @@ def main() -> None:
         max_missed_cleavages=2,
         min_length=7,
         max_length=30,
+        max_peptides=a.max_peptides,
         mods=a.mods,
         floor=1e-3,
         charge_model="site-specific",

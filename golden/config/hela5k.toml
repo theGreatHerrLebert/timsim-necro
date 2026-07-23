@@ -1,0 +1,3 @@
+[[source]]
+path = "/scratch/timsim-demo/timsim-necro-repo/golden/config/hela5k.fasta"
+organism = "HUMAN"
