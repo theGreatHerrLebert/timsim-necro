@@ -294,15 +294,21 @@ class BrukerTruthV2(NodeType):
 
 
 class SciexMzmlData(NodeType):
-    """A SCIEX ZenoTOF SWATH run authored into open **mzML** (the CLEAN path — the native `.wiff` writer
-    corrupts fragment m/z, see SCIEX_CONSOLIDATION.md). A directory node: the legacy `timsim` writes
-    `sciex.mzML` (+ its synthetic DB + provenance) into it. Distinct from Thermo/Bruker so a wrong
-    consumer is a type error. Restages when the SCIEX config (template + params) changes."""
+    """A SCIEX ZenoTOF SWATH run authored into open **mzML** by the LEAN v2 projector
+    (`timsim-render-sciex`) — feature space → synthesised SWATH schedule → mzML via `timsim-core`'s
+    mzdata writer, imspy-free and with NO `.wiff`/`sciexwiff` dependency. A single mzML FILE (not the v1
+    directory). No config file: the SWATH params live in the command, so necroflow's fingerprint already
+    covers them — no custom invalidator. Distinct from Thermo/Bruker so a wrong consumer is a type error."""
 
-    filename = "mzml"
-    # Hash the config TOML AND the .wiff template it points at — the template is a hidden dependency the
-    # config-only hash would miss (the legacy CLI has no --template flag).
-    invalidator = hashes_sciex_config("sciex_config")
+    filename = "sciex.mzML"
+
+
+class SciexTruthV2(NodeType):
+    """The per-precursor SWATH answer key co-emitted with the lean SCIEX mzML — the SAME 8-column schema
+    as [`ThermoTruth`]/[`BrukerTruthV2`], so the instrument-agnostic `timsim_eval` scorer consumes it
+    unchanged. Cached and invalidated with its mzML."""
+
+    filename = "truth.parquet"
 
 
 class DiannReport(NodeType):
@@ -581,33 +587,44 @@ def render(
     return BrukerRawDataV2[raw], BrukerTruthV2[truth]
 
 
-# ── SCIEX ZenoTOF SWATH → mzML (no-IMS, template-based, the clean non-native path) ──
+# ── SCIEX ZenoTOF SWATH → open mzML (no-IMS, LEAN v2 projector, synthesised schedule) ──
+# The imspy-free counterpart of the v1 `timsim` build-from-`.wiff`: it reuses the SAME
+# frag_input → fragments → spectra feature-space nodes as the Thermo/Bruker paths, then projects the
+# instrument-independent spectra onto a SYNTHESISED SWATH schedule and writes open mzML — no `.wiff`, no
+# `sciexwiff`/`sciex-io` (legally clean; native `.wiff` is a separate rustims-local satellite).
 
 
 @r.command(
-    "mkdir -p {mzml} && timsim {sciex_config} --save-path {mzml} "
-    "--v2-proteome {proteome} --v2-peptides {peptides} --v2-occurrences {occurrences} "
-    "--v2-peptide-quantities {peptide_quantities} --v2-precursors {precursors} --v2-rt {peptide_rt} "
-    "--v2-sample {sample_id} --seed {seed}",
-    threads=4,
-    ram="16Gi",
+    f"{BIN}/timsim-render-sciex --precursors {{precursors}} --peptide-rt {{peptide_rt}} "
+    "--ion-spectra {ion_spectra} --peptide-quantities {peptide_quantities} --sample {sample_id} "
+    "--gradient-length-s {gradient_length_s} --cycle-time-s {cycle_time_s} "
+    "--mz-min {mz_min} --mz-max {mz_max} --window-width {window_width} "
+    "--collision-energy {collision_energy} --intensity-scale {intensity_scale} "
+    "--frag-model {frag_model} --out {mzml} --truth {truth}",
+    threads=2,
+    ram="8Gi",
 )
 def render_sciex(
-    proteome: Proteome,
-    peptides: Peptides,
-    occurrences: Occurrences,
-    peptide_quantities: PeptideQuantities,
     precursors: Precursors,
     peptide_rt: PeptideRT,
-    sciex_config: str,
+    ion_spectra: IonSpectra,
+    peptide_quantities: PeptideQuantities,
     sample_id: str,
-    seed: int,
+    gradient_length_s: float,
+    cycle_time_s: float,
+    mz_min: float,
+    mz_max: float,
+    window_width: float,
+    collision_energy: float,
+    intensity_scale: float,
+    frag_model: str,
 ):
-    """MEASUREMENT (no-IMS): the legacy `timsim` SCIEX ZenoTOF SWATH build-from-`.wiff`, driven from the v2
-    feature space, authored to open mzML (`sciex.mzML`). Self-contained like the Bruker `simulate` node —
-    it predicts fragments internally (Koina HCD, set in the config), so it does NOT use the v2
-    fragments/spectra nodes. No `--v2-ccs` (SCIEX has no ion mobility)."""
-    return SciexMzmlData[mzml]
+    """MEASUREMENT (SCIEX ZenoTOF SWATH, no-IMS): the lean v2 projector places the instrument-independent
+    `ion_spectra` onto a synthesised fixed-width SWATH schedule and writes open **mzML** — imspy-free, no
+    `.wiff`. One node per sample (via `peptide_quantities` + `sample_id`); the SWATH params are in the
+    command so the fingerprint covers them (no template file). Co-emits the per-precursor answer key
+    (`--truth`) so a DiaNN search of the mzML closes search→score like the Thermo/Bruker paths."""
+    return SciexMzmlData[mzml], SciexTruthV2[truth]
 
 
 # ── phase 2: search + score (close simulate -> search -> score) ──────────────
@@ -686,6 +703,43 @@ def score_bruker(diann: DiannReport, truth: BrukerTruthV2, peptides: Peptides, q
     """SCORE (Bruker): identical to `score`, but keyed on the Bruker answer key [`BrukerTruthV2`]. The
     `timsim_eval` scorer is instrument-agnostic — the truth schema is the same 8 columns — so the Bruker
     `.d` closes search→score exactly like the Thermo path."""
+    return ScoreMetrics[metrics]
+
+
+# ── phase 2 for the lean SCIEX mzML (DiaNN reads open mzML NATIVELY — no .NET) ──
+
+
+@r.command(
+    f"mkdir -p {{diann}} && {DIANN} "
+    "--f {mzml} --fasta {search_fasta} --out {diann}/report.parquet "
+    "--fasta-search --predictor --gen-spec-lib --qvalue {qvalue} --threads {search_threads} "
+    "--met-excision --cut 'K*,R*' --missed-cleavages {max_missed_cleavages} "
+    "--min-pep-len {min_length} --max-pep-len {max_length} --var-mods 1 --unimod35",
+    threads=16,
+    ram="32Gi",
+)
+def search_sciex(
+    mzml: SciexMzmlData,
+    search_fasta: str,
+    qvalue: float,
+    search_threads: int,
+    max_missed_cleavages: int,
+    min_length: int,
+    max_length: int,
+):
+    """SEARCH (SCIEX SWATH): DiaNN library-free over the rendered open **mzML** — DiaNN's native open
+    input, no .NET, no vendor SDK. The FASTA is a content-hashed dependency."""
+    return DiannReport[diann]
+
+
+@r.command(
+    "python -m timsim_eval.v2_thermo_eval "
+    "--report {diann}/report.parquet --truth {truth} --peptides {peptides} "
+    "--fdr {qvalue} --out {metrics}"
+)
+def score_sciex(diann: DiannReport, truth: SciexTruthV2, peptides: Peptides, qvalue: float):
+    """SCORE (SCIEX): the same instrument-agnostic `timsim_eval` scorer, keyed on the SWATH answer key
+    [`SciexTruthV2`] — the SCIEX mzML closes search→score exactly like Thermo/Bruker."""
     return ScoreMetrics[metrics]
 
 
@@ -884,10 +938,10 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
 
 
 def timsim_sciex_pipeline(cfg, sample_id: str) -> Pipeline:
-    """One sample to a SCIEX ZenoTOF SWATH **mzML**, reusing the SAME feature-space nodes as the Bruker and
-    Thermo pipelines (so requesting all three collapses the structure to one computation). The measurement
-    is the legacy `timsim` SCIEX build-from-`.wiff` render (self-contained, no fragments/spectra nodes),
-    authored to open mzML — the clean path that sidesteps the broken native `.wiff` writer. No CCS."""
+    """One sample to a SCIEX ZenoTOF SWATH **mzML** via the LEAN v2 projector (`timsim-render-sciex`) —
+    imspy-free, no `.wiff`. Reuses the SAME `frag_input → fragments → spectra` feature-space chain as the
+    Thermo/Bruker pipelines (so requesting all three collapses the structure to one computation), then
+    projects onto a synthesised SWATH schedule. No CCS (SCIEX has no ion mobility)."""
     P = Pipeline()
     P.proteome = r.proteome(spec=cfg.proteome_spec)
     P.peptides, P.occurrences, P.cleavage_sites = r.digest(
@@ -906,10 +960,43 @@ def timsim_sciex_pipeline(cfg, sample_id: str) -> Pipeline:
         P.proteome, P.occurrences, P.cleavage_sites, P.protein_quantities, P.modifications,
         digestion_efficiency=cfg.digestion_efficiency,
     )
-    P.mzml = r.render_sciex(
-        P.proteome, P.peptides, P.occurrences, P.peptide_quantities, P.precursors, P.rt,
-        sciex_config=cfg.sciex_config, sample_id=sample_id, seed=cfg.seed,
+    # ── measurement branch: same feature-space nodes as Thermo/Bruker, then the SWATH mzML projector ──
+    P.fragment_prediction_input = r.frag_input(
+        P.precursors, P.peptides, P.modforms, P.modifications
     )
+    P.fragment_intensities = r.fragments(
+        P.fragment_prediction_input, collision_energy=cfg.collision_energy, frag_model=cfg.frag_model
+    )
+    P.ion_spectra = r.spectra(
+        P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities
+    )
+    P.mzml, P.truth = r.render_sciex(
+        P.precursors,
+        P.rt,
+        P.ion_spectra,
+        P.peptide_quantities,
+        sample_id=sample_id,
+        gradient_length_s=cfg.gradient_length_s,
+        cycle_time_s=cfg.cycle_time_s,
+        mz_min=cfg.mz_min,
+        mz_max=cfg.mz_max,
+        window_width=cfg.window_width,
+        collision_energy=cfg.collision_energy,
+        intensity_scale=cfg.intensity_scale,
+        frag_model=cfg.frag_model,
+    )
+    # ── phase 2 (opt-in): DiaNN-search the mzML natively + score against the answer key ──
+    if getattr(cfg, "search_fasta", None):
+        P.diann = r.search_sciex(
+            P.mzml,
+            search_fasta=cfg.search_fasta,
+            qvalue=cfg.qvalue,
+            search_threads=cfg.search_threads,
+            max_missed_cleavages=cfg.max_missed_cleavages,
+            min_length=cfg.min_length,
+            max_length=cfg.max_length,
+        )
+        P.score = r.score_sciex(P.diann, P.truth, P.peptides, qvalue=cfg.qvalue)
     return P
 
 
@@ -925,8 +1012,13 @@ def main() -> None:
     ap.add_argument("--thermo-template", help="build the Thermo .raw pipeline against this template")
     ap.add_argument("--bruker-reference", help="build the LEAN v2 Bruker .d pipeline (timsim-render) against "
                                                "this reference DIA .d — imspy-free, replaces the v1 `simulate` seam")
-    ap.add_argument("--sciex-config", help="build the SCIEX ZenoTOF SWATH -> mzML pipeline with this config "
-                                           "TOML (instrument/template/CE/model; e.g. sciex.toml)")
+    ap.add_argument("--sciex", action="store_true", help="build the LEAN v2 SCIEX ZenoTOF SWATH -> open mzML "
+                                                         "pipeline (timsim-render-sciex) — imspy-free, no .wiff")
+    ap.add_argument("--sciex-gradient-s", type=float, default=1800.0, help="SCIEX SWATH gradient length (s)")
+    ap.add_argument("--sciex-cycle-s", type=float, default=3.0, help="SCIEX SWATH cycle time (s)")
+    ap.add_argument("--sciex-mz-min", type=float, default=400.0, help="SCIEX SWATH window coverage min m/z")
+    ap.add_argument("--sciex-mz-max", type=float, default=1200.0, help="SCIEX SWATH window coverage max m/z")
+    ap.add_argument("--sciex-window-width", type=float, default=25.0, help="SCIEX SWATH isolation window width (Th)")
     ap.add_argument("--frag-model", default="", help="fragment model: '' (local timsTOF) or 'koina:Prosit_2020_intensity_HCD'")
     ap.add_argument("--collision-energy", type=float, default=25.0)
     ap.add_argument("--intensity-scale", type=float, default=5.0e5)
@@ -956,11 +1048,16 @@ def main() -> None:
         search_fasta=a.search_fasta,
         qvalue=a.qvalue,
         search_threads=a.search_threads,
-        sciex_config=a.sciex_config,
         reference_d=a.bruker_reference,
+        # SCIEX SWATH schedule (synthesised — no .wiff)
+        gradient_length_s=a.sciex_gradient_s,
+        cycle_time_s=a.sciex_cycle_s,
+        mz_min=a.sciex_mz_min,
+        mz_max=a.sciex_mz_max,
+        window_width=a.sciex_window_width,
     )
 
-    if a.sciex_config:
+    if a.sciex:
         build = timsim_sciex_pipeline
     elif a.thermo_template:
         build = timsim_thermo_pipeline
