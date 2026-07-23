@@ -13,8 +13,22 @@ That means reproducing v1's finding needs **both** pieces, and they map onto the
   data and show *which* inflate. (Neither DiaNN 1.8 nor Spectronaut is installed — a dependency to add.)
 
 Noise is still P0 regardless: even a well-calibrated engine can't be fairly stress-tested on a clean
-background, and every sample-type benchmark below needs it. This track has two capabilities, from "model the
-background" to "use a real one":
+background, and every sample-type benchmark below needs it.
+
+**v1's two noise axes (don't conflate them).** v1 distinguishes noise on the *simulated signal* from noise
+that is *background* (peaks tied to no real ion). The real v1 DIA recipe (`IT-DIA-HYE-B.toml`) turns on one
+of each — signal-m/z **and** real-data-background — together:
+
+| v1 config | axis | our track | v1 DIA default |
+|---|---|---|---|
+| `mz_noise_precursor/fragment` + `_ppm`, `mz_noise_uniform` | **signal** — m/z position scatter | **A1** ✅ | ON: Gaussian, 6.5 ppm |
+| `detection_noise` (isotopes.py `add_detection_noise`) | **signal** — intensity shot noise | — (skip) | OFF (isotope-gen only) |
+| `add_real_data_noise` (+ `reference_noise_intensity_max`, `num_*_noise_frames`) | **background** — real peaks from the ref `.d` | **A2** | ON |
+| `baseline_shot_noise` (noise.py) | **background** — synthetic baseline | **A3** | unwired / legacy |
+| `noise_frame/scan_abundance` | abundance | dropped | OFF |
+
+So true v1 parity is **A1 + A2 on at once**; the intensity/abundance layers are v1-default-OFF (which is why
+the plan skips them). This track has two capabilities, from "model the background" to "use a real one":
 
 - **A. Noise** — synthesise a realistic background onto a fully-synthetic render (everything stays ground
   truth; noise just makes FDP/scoring real).
@@ -32,12 +46,20 @@ byte-test stays the reproducibility gate for `--noise off`).
 Three layers, in value/effort order. v1's machinery: `jobs/add_noise_from_real_data.py`, `noise.py`,
 m/z-noise in `jobs/assemble_frames.py`.
 
-**A1. m/z-ppm scatter (easy, all instruments).** Per-peak Gaussian ppm jitter on m/z before m/z→tof, so a
-search engine sees a realistic non-degenerate mass-error distribution to calibrate against.
-- Render flag: `--noise-mz-ppm <ppm>` (precursor) + `--noise-frag-ppm <ppm>` (fragment); `0` = off.
-- Seed per `(precursor_id, peak_index)` (identity-keyed, like `survival`) so adding an ion doesn't
-  reshuffle others — reproducible + stable under `--limit`.
-- Applied in the projection closure; the noiseless path (`--noise-mz-ppm 0`) stays byte-identical.
+**A1. m/z-ppm scatter (easy, all instruments). ✅ DONE — checked against v1 (`timsim-cli` 7105d73).**
+Per-peak m/z jitter before m/z→tof, so a search engine sees a realistic non-degenerate mass-error
+distribution to calibrate against. Matched to v1's `mscore::add_mz_noise_normal/_uniform`:
+- Render flags: `--noise-mz-ppm <ppm>` (precursor) + `--noise-frag-ppm <ppm>` (fragment); `0` = off.
+  `--noise-mz-uniform` selects v1's uniform mode; default is Gaussian (v1 default). `--noise-seed`.
+- **v1 scale match:** the ppm value is a **3σ envelope** (v1 convention): Gaussian sd = `mz·ppm/1e6/3`;
+  uniform = `mz ± mz·ppm/1e6`. So `--noise-mz-ppm 6.5` reproduces the real v1 DIA config. (v1's asymmetric
+  `right_drag` tailing variant not ported.)
+- Seed per `(precursor_id, is_frag, peak_index)` via successive splitmix64 avalanches (identity-keyed, like
+  `survival`) so adding an ion doesn't reshuffle others — reproducible + stable under `--limit`.
+  **Deliberate divergence:** v1 redraws m/z noise *per scan*; we draw once per (precursor, peak) — same
+  marginal distribution, coherent across the elution (v2 projects each spectrum to tof once, then deposits).
+- Applied in the projection closure; the noiseless path (`--noise-mz-ppm 0`) stays byte-identical (verified:
+  hash unchanged vs the frozen baseline). Unit tests pin N(0,1)/U(−1,1) shape + MS1/MS2 key independence.
 
 **A2. Real-data-noise injection (moderate, Bruker).** Sample **actual background peaks from the reference
 `.d`** and add them per frame — window-group-aware for MS2. This is the realistic chemical/electronic
@@ -81,13 +103,16 @@ real run IS the noise).
 
 ## Sequencing + validation
 
-1. **A1 (m/z-ppm)** — small, all instruments, immediately makes FDP less fake. Validate: `--noise-mz-ppm 0`
-   byte-identical to today; a nonzero value shifts the mass-error distribution DiaNN calibrates against. It
-   should raise measured true-FDR in the *expected* direction, but the full **reproduction of v1's headline
-   needs the tool axis too** — Spectronaut + DiaNN 1.8 on the noised data (that's where the inflation
-   lived; DiaNN 2.5 alone may stay clean, which is itself a finding worth reporting).
-2. **A2 (real-data noise)** — Bruker; validate the reference's sampled peaks land in-frame and FDP moves
-   toward v1's 3–5%.
+1. **A1 (m/z-ppm) ✅ DONE + v1-matched.** Validated: `--noise-mz-ppm 0` byte-identical to the frozen
+   baseline; nonzero shifts the mass-error distribution DiaNN calibrates against (Gaussian sd `mz·ppm/3e6`,
+   reproducing v1). A1 alone won't reproduce v1's headline — that needs **A2 (below)** for the real
+   background **and** the **tool axis** (Spectronaut + DiaNN 1.8 on the noised data; DiaNN 2.5 alone may
+   stay clean, itself a finding). Remaining A1 wiring: expose the flags through the necroflow render node +
+   run config so a pipeline/golden run can turn it on.
+2. **A2 (real-data noise) — the parity-completing piece.** The real v1 DIA recipe runs A1 **and** A2
+   together (`add_real_data_noise=true`), so this is what closes true v1 parity, not A1 alone. Bruker;
+   sample real background peaks from the reference `.d` (`reference_noise_intensity_max`,
+   `num_*_noise_frames`). Validate the sampled peaks land in-frame and FDP moves toward v1's 3–5%.
 3. **B (spike-into-real)** — the additive-onto-real render + the spike-recovery eval mode. Validate: the
    real `.d`'s peaks are preserved and a known spike is recoverable in the real matrix.
 
