@@ -63,17 +63,20 @@ python flow/timsim_flow.py --help         # drive the DAG
 **Render backends**
 - **Thermo `.raw`** (`--thermo-template`) — lean: `frag_input → fragments → spectra → render-thermo`
   (timsim-cli). Co-emits the answer key + manifest → the phase-2 DiaNN `search`/`score` closes on it.
-- **Bruker `.d`** (`--bruker-reference <ref.d>`) — **lean v2**: the same feature-space chain plus CCS →
-  `timsim-render`, a streaming imspy-free projector onto a reference `.d`'s DIA schedule. Verified: a
-  60-protein run authors a valid 3000-frame DIA `.d` (177 MS1 + 2823 MS2, 15k windows). The default
-  Bruker path (no flag) still uses the v1 `timsim` monolith (imspy) — it owns DDA and the DIA truth
-  output v2 does not emit yet, so scored Bruker runs stay on v1 until `run_dia` writes an answer key.
+- **Bruker `.d`** (`--bruker-reference <ref.d>`) — **lean v2, fully closed**: the same feature-space chain
+  plus CCS → `timsim-render`, a streaming imspy-free projector onto a reference `.d`'s DIA schedule, which
+  **co-emits the per-precursor answer key** (same 8-column schema as Thermo). With `--search-fasta` the
+  DAG appends `search_bruker` (DiaNN reads the `.d` **natively** — no .NET) + `score_bruker`, so Bruker
+  closes structure → render → search → score just like Thermo. Verified end-to-end: a 60-protein run
+  authors a valid 3000-frame DIA `.d` (177 MS1 + 2823 MS2), a 42,919-row truth, DiaNN searches it as
+  Slice-PASEF, and the scorer reports a monotonic recall-by-abundance ladder. The default Bruker path
+  (no flag) still uses the v1 `timsim` monolith (imspy) because it owns **DDA**; lean v2 covers DIA.
 - **SCIEX mzML** (`--sciex-config`) — still the v1 `timsim` build-from-`.wiff` (imspy); no native v2
   SCIEX renderer exists.
 
-**No gaps left on the Thermo path** — structure → prediction → render → search → score ingests only small,
-independently-versioned federated repos, zero imspy / zero rustims. The lean Bruker `.d` render is wired
-and verified; Bruker-DIA scoring and SCIEX remain the two v1 touchpoints.
+**Thermo and Bruker DIA both close structure → render → search → score** on small, independently-versioned
+federated repos — zero imspy, zero rustims. The two remaining v1 touchpoints are **Bruker DDA** (the v2
+render has a DDA mode but the default path is still the monolith) and **SCIEX** (no native v2 renderer).
 
 ## Layout
 ```

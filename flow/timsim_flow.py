@@ -284,6 +284,15 @@ class BrukerRawDataV2(NodeType):
     invalidator = hashes_reference_d("reference_d")
 
 
+class BrukerTruthV2(NodeType):
+    """The per-precursor DIA answer key co-emitted with the lean Bruker `.d` — the SAME 8-column schema as
+    [`ThermoTruth`] (precursor_id, peptide_id, charge, mz, rt_seconds, abundance, has_ms2, in_any_window),
+    so the instrument-agnostic `timsim_eval` score node consumes it unchanged. A co-output of the render,
+    so it is cached and invalidated EXACTLY with its `.d` (never a drifting sidecar)."""
+
+    filename = "truth.parquet"
+
+
 class SciexMzmlData(NodeType):
     """A SCIEX ZenoTOF SWATH run authored into open **mzML** (the CLEAN path — the native `.wiff` writer
     corrupts fragment m/z, see SCIEX_CONSOLIDATION.md). A directory node: the legacy `timsim` writes
@@ -547,7 +556,8 @@ def render_thermo(
     f"{BIN}/timsim-render --precursors {{precursors}} --peptide-rt {{peptide_rt}} "
     "--ion-spectra {ion_spectra} --precursor-ccs {precursor_ccs} "
     "--peptide-quantities {peptide_quantities} --sample {sample_id} "
-    "--reference-d {reference_d} --dia --intensity-scale {intensity_scale} --out {raw}",
+    "--reference-d {reference_d} --dia --intensity-scale {intensity_scale} "
+    "--out {raw} --truth {truth}",
     threads=2,
     ram="8Gi",
 )
@@ -566,8 +576,9 @@ def render(
     memory bounded by the elution set. One node per sample (via `peptide_quantities` + `sample_id`);
     restages when the reference `.d` changes. `--precursor-ccs` gives each ion physical 1/K0; abundance
     from `peptide_quantities` restores the real dynamic range. DIA mode gates fragments by the reference's
-    diagonal quadrupole transmission."""
-    return BrukerRawDataV2[raw]
+    diagonal quadrupole transmission. Co-emits the per-precursor answer key (`--truth`) so a DiaNN search
+    of the `.d` closes search→score exactly like the Thermo path."""
+    return BrukerRawDataV2[raw], BrukerTruthV2[truth]
 
 
 # ── SCIEX ZenoTOF SWATH → mzML (no-IMS, template-based, the clean non-native path) ──
@@ -636,6 +647,45 @@ def score(diann: DiannReport, truth: ThermoTruth, peptides: Peptides, qvalue: fl
     """SCORE: the DiaNN report against the render's answer key. Hierarchical recall + FDP + recall-by-
     abundance-decile, content-addressed to the exact `.raw`/truth/DB that produced it — so the number
     can never be attributed to the wrong run."""
+    return ScoreMetrics[metrics]
+
+
+# ── phase 2 for the lean Bruker `.d` (dia-PASEF; DiaNN reads `.d` NATIVELY — no .NET) ──
+
+
+@r.command(
+    f"mkdir -p {{diann}} && {DIANN} "
+    "--f {data_d} --fasta {search_fasta} --out {diann}/report.parquet "
+    "--fasta-search --predictor --gen-spec-lib --qvalue {qvalue} --threads {search_threads} "
+    "--met-excision --cut 'K*,R*' --missed-cleavages {max_missed_cleavages} "
+    "--min-pep-len {min_length} --max-pep-len {max_length} --var-mods 1 --unimod35",
+    threads=16,
+    ram="32Gi",
+)
+def search_bruker(
+    data_d: BrukerRawDataV2,
+    search_fasta: str,
+    qvalue: float,
+    search_threads: int,
+    max_missed_cleavages: int,
+    min_length: int,
+    max_length: int,
+):
+    """SEARCH (Bruker dia-PASEF): DiaNN library-free over the rendered `.d`. Unlike the Thermo `.raw`, a
+    Bruker `.d` is DiaNN's NATIVE input on Linux — no .NET runtime. The FASTA is a content-hashed
+    dependency; a different render or DB is a different search."""
+    return DiannReport[diann]
+
+
+@r.command(
+    "python -m timsim_eval.v2_thermo_eval "
+    "--report {diann}/report.parquet --truth {truth} --peptides {peptides} "
+    "--fdr {qvalue} --out {metrics}"
+)
+def score_bruker(diann: DiannReport, truth: BrukerTruthV2, peptides: Peptides, qvalue: float):
+    """SCORE (Bruker): identical to `score`, but keyed on the Bruker answer key [`BrukerTruthV2`]. The
+    `timsim_eval` scorer is instrument-agnostic — the truth schema is the same 8 columns — so the Bruker
+    `.d` closes search→score exactly like the Thermo path."""
     return ScoreMetrics[metrics]
 
 
@@ -808,7 +858,7 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
     P.ion_spectra = r.spectra(
         P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities
     )
-    P.raw = r.render(
+    P.raw, P.truth = r.render(
         P.precursors,
         P.rt,
         P.ion_spectra,
@@ -818,6 +868,18 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
         sample_id=sample_id,
         intensity_scale=cfg.intensity_scale,
     )
+    # ── phase 2 (opt-in): DiaNN-search the .d natively + score against the answer key ──
+    if getattr(cfg, "search_fasta", None):
+        P.diann = r.search_bruker(
+            P.raw,
+            search_fasta=cfg.search_fasta,
+            qvalue=cfg.qvalue,
+            search_threads=cfg.search_threads,
+            max_missed_cleavages=cfg.max_missed_cleavages,
+            min_length=cfg.min_length,
+            max_length=cfg.max_length,
+        )
+        P.score = r.score_bruker(P.diann, P.truth, P.peptides, qvalue=cfg.qvalue)
     return P
 
 
@@ -913,7 +975,10 @@ def main() -> None:
         # the render), so request them explicitly alongside the .raw.
         req = [P.mzml] if getattr(P, "mzml", None) is not None else [P.raw]
         if getattr(P, "truth", None) is not None:
-            req += [P.truth, P.manifest]
+            req.append(P.truth)
+            # The Thermo render also co-emits a run manifest; the lean Bruker render does not.
+            if getattr(P, "manifest", None) is not None:
+                req.append(P.manifest)
         # Phase 2 (opt-in): the score is the terminal deliverable — requesting it pulls search + the .raw.
         if getattr(P, "score", None) is not None:
             req.append(P.score)
