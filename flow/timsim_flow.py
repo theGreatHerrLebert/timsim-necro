@@ -293,6 +293,31 @@ class BrukerTruthV2(NodeType):
     filename = "truth.parquet"
 
 
+class BrukerDdaData(NodeType):
+    """A Bruker DDA-PASEF `.d` authored by `timsim-render --dda`: MS1 surveys + top-N precursor selection
+    with dynamic exclusion + band-limited MS2. A DISTINCT type from the DIA [`BrukerRawDataV2`] so a
+    wrong-consumer is a type error (DDA is searched by Sage, DIA by DiaNN). Restages on the reference `.d`."""
+
+    filename = "data.d"
+    invalidator = hashes_reference_d("reference_d")
+
+
+class DdaTruth(NodeType):
+    """The DDA answer key co-emitted with the `.d` (`--dda-truth`) — one row per SELECTION EVENT, tying
+    each MS2 to the true precursor (ms2_frame, scan_begin/end, tdf_precursor_id, precursor_id, peptide_id,
+    charge, mono_mz, rt_seconds, …). The `timsim_eval` DDA scorer maps Sage's `scannr` to `tdf_precursor_id`
+    to score identifications against the precursors DDA actually fragmented. Cached with its `.d`."""
+
+    filename = "dda_truth.parquet"
+
+
+class SageReport(NodeType):
+    """A Sage database search of a DDA `.d` — the SEARCH half of the DDA phase 2. A directory node (Sage
+    writes `results.sage.tsv` + quant alongside). Restages when the search FASTA changes."""
+
+    filename = "sage"
+
+
 class SciexMzmlData(NodeType):
     """A SCIEX ZenoTOF SWATH run authored into open **mzML** by the LEAN v2 projector
     (`timsim-render-sciex`) — feature space → synthesised SWATH schedule → mzML via `timsim-core`'s
@@ -337,6 +362,10 @@ BIN = os.environ.get("TIMSIM_BIN", "target/release")
 # Phase-2 search: DiaNN reads Thermo .raw natively only with the .NET 8 runtime (DOTNET_ROOT + on PATH).
 DIANN = os.environ.get("TIMSIM_DIANN", "/home/administrator/dia-nn/diann-2.5.0/diann-linux")
 DOTNET = os.environ.get("DOTNET_ROOT", os.path.expanduser("~/.dotnet"))
+# Sage (DDA database search of Bruker `.d`, natively). Config supplies enzyme/mods/tolerances; the FASTA is
+# overridden per run with `-f`. Built from lazear/sage with the local `.d` read patch.
+SAGE = os.environ.get("TIMSIM_SAGE", "/home/administrator/Documents/promotion/rust/sage/target/release/sage")
+SAGE_CONFIG = os.environ.get("TIMSIM_SAGE_CONFIG", "/scratch/timsim-demo/SAGEBench/configs/sage-smoke.json")
 
 
 @r.command(f"{BIN}/timsim-proteome --spec {{spec}} --out {{proteome}}")
@@ -591,6 +620,41 @@ def render(
     return BrukerRawDataV2[raw], BrukerTruthV2[truth]
 
 
+# ── Bruker DDA-PASEF → `.d` (top-N selection + dynamic exclusion; searched by Sage, not DiaNN) ──
+# The DDA counterpart of the DIA render: same feature-space chain (frag_input → fragments → spectra) +
+# CCS, then `timsim-render --dda` synthesises MS1 surveys + top-N precursor selection with dynamic
+# exclusion + band-limited MS2, and co-emits a per-SELECTION-EVENT answer key.
+
+
+@r.command(
+    f"{BIN}/timsim-render --dda --precursors {{precursors}} --peptide-rt {{peptide_rt}} "
+    "--ion-spectra {ion_spectra} --precursor-ccs {precursor_ccs} --peptide-quantities {peptide_quantities} "
+    "--sample {sample_id} --reference-d {reference_d} --intensity-scale {intensity_scale} "
+    "--precursors-every {precursors_every} --max-precursors {max_precursors} --exclusion-width {exclusion_width} "
+    "--out {raw} --dda-truth {truth}",
+    threads=2,
+    ram="8Gi",
+)
+def render_dda(
+    precursors: Precursors,
+    peptide_rt: PeptideRT,
+    ion_spectra: IonSpectra,
+    precursor_ccs: PrecursorCCS,
+    peptide_quantities: PeptideQuantities,
+    reference_d: str,
+    sample_id: str,
+    intensity_scale: float,
+    precursors_every: int,
+    max_precursors: int,
+    exclusion_width: int,
+):
+    """MEASUREMENT (Bruker DDA-PASEF): MS1 surveys every `precursors_every` frames, top-N (`max_precursors`)
+    precursor selection with `exclusion_width`-frame dynamic exclusion, band-limited MS2 on the reference's
+    scan geometry. Co-emits `--dda-truth` (one row per selection event) so a Sage search of the `.d` scores
+    against exactly the precursors DDA fragmented. Restages when the reference `.d` changes."""
+    return BrukerDdaData[raw], DdaTruth[truth]
+
+
 # ── SCIEX ZenoTOF SWATH → open mzML (no-IMS, LEAN v2 projector, synthesised schedule) ──
 # The imspy-free counterpart of the v1 `timsim` build-from-`.wiff`: it reuses the SAME
 # frag_input → fragments → spectra feature-space nodes as the Thermo/Bruker paths, then projects the
@@ -744,6 +808,32 @@ def search_sciex(
 def score_sciex(diann: DiannReport, truth: SciexTruthV2, peptides: Peptides, qvalue: float):
     """SCORE (SCIEX): the same instrument-agnostic `timsim_eval` scorer, keyed on the SWATH answer key
     [`SciexTruthV2`] — the SCIEX mzML closes search→score exactly like Thermo/Bruker."""
+    return ScoreMetrics[metrics]
+
+
+# ── phase 2 for Bruker DDA-PASEF (Sage database search of the `.d`; NOT DiaNN, which is DIA-only) ──
+
+
+@r.command(
+    f"mkdir -p {{sage}} && {SAGE} -f {{search_fasta}} -o {{sage}} {SAGE_CONFIG} {{data_d}}",
+    threads=16,
+    ram="32Gi",
+)
+def search_dda(data_d: BrukerDdaData, search_fasta: str):
+    """SEARCH (Bruker DDA): Sage database search over the rendered `.d` (native `.d` reader). The Sage
+    config (enzyme/mods/tolerances) is `TIMSIM_SAGE_CONFIG`; the FASTA is overridden per run with `-f`, so
+    the same content-hashed dependency logic applies (a different render or DB is a different search)."""
+    return SageReport[sage]
+
+
+@r.command(
+    "python -m timsim_eval.v2_dda_eval "
+    "--sage {sage}/results.sage.tsv --truth {truth} --peptides {peptides} --fdr {qvalue} --out {metrics}"
+)
+def score_dda(sage: SageReport, truth: DdaTruth, peptides: Peptides, qvalue: float):
+    """SCORE (Bruker DDA): map Sage's PSMs (`scannr` → `tdf_precursor_id`) onto the selection-event answer
+    key. DDA recall is CONDITIONAL — over the precursors DDA actually fragmented (top-N), not all
+    precursors — because DDA only selects a subset per cycle."""
     return ScoreMetrics[metrics]
 
 
@@ -947,6 +1037,66 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
     return P
 
 
+def timsim_bruker_dda_pipeline(cfg, sample_id: str) -> Pipeline:
+    """One sample to a Bruker DDA-PASEF `.d` — identical feature-space chain to the Bruker DIA pipeline
+    (so requesting DIA and DDA collapses the structure axis to one computation), but the measurement is
+    `timsim-render --dda` (top-N selection) and phase-2 is Sage → `v2_dda_eval` (DiaNN is DIA-only).
+    Opt-in via `--bruker-dda <ref.d>`."""
+    P = Pipeline()
+    P.proteome = r.proteome(spec=cfg.proteome_spec)
+    P.peptides, P.occurrences, P.cleavage_sites = r.digest(
+        P.proteome,
+        max_missed_cleavages=cfg.max_missed_cleavages,
+        min_length=cfg.min_length,
+        max_length=cfg.max_length,
+        max_peptides=cfg.max_peptides,
+        seed=cfg.seed,
+    )
+    P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.precursors = r.precursors(P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.ccs = r.ccs(P.precursors, P.peptides)
+    P.rt = r.rt(P.peptides)
+    P.samples, P.runs, P.sample_run_map, P.protein_quantities = r.design(
+        P.proteome, spec=cfg.design_spec
+    )
+    P.peptide_quantities = r.peptide_yield(
+        P.proteome,
+        P.occurrences,
+        P.cleavage_sites,
+        P.protein_quantities,
+        P.modifications,
+        digestion_efficiency=cfg.digestion_efficiency,
+    )
+    # ── measurement branch: same feature-space nodes as Bruker DIA, then the DDA-PASEF projector ──
+    P.fragment_prediction_input = r.frag_input(
+        P.precursors, P.peptides, P.modforms, P.modifications
+    )
+    P.fragment_intensities = r.fragments(
+        P.fragment_prediction_input, collision_energy=cfg.collision_energy, frag_model=cfg.frag_model
+    )
+    P.ion_spectra = r.spectra(
+        P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities
+    )
+    P.raw, P.truth = r.render_dda(
+        P.precursors,
+        P.rt,
+        P.ion_spectra,
+        P.ccs,
+        P.peptide_quantities,
+        reference_d=cfg.reference_d,
+        sample_id=sample_id,
+        intensity_scale=cfg.intensity_scale,
+        precursors_every=cfg.dda_precursors_every,
+        max_precursors=cfg.dda_max_precursors,
+        exclusion_width=cfg.dda_exclusion_width,
+    )
+    # ── phase 2 (opt-in): Sage-search the .d + score against the selection-event answer key ──
+    if getattr(cfg, "search_fasta", None):
+        P.sage = r.search_dda(P.raw, search_fasta=cfg.search_fasta)
+        P.score = r.score_dda(P.sage, P.truth, P.peptides, qvalue=cfg.qvalue)
+    return P
+
+
 def timsim_sciex_pipeline(cfg, sample_id: str) -> Pipeline:
     """One sample to a SCIEX ZenoTOF SWATH **mzML** via the LEAN v2 projector (`timsim-render-sciex`) —
     imspy-free, no `.wiff`. Reuses the SAME `frag_input → fragments → spectra` feature-space chain as the
@@ -1027,6 +1177,11 @@ def main() -> None:
     ap.add_argument("--thermo-template", help="build the Thermo .raw pipeline against this template")
     ap.add_argument("--bruker-reference", help="build the LEAN v2 Bruker .d pipeline (timsim-render) against "
                                                "this reference DIA .d — imspy-free, replaces the v1 `simulate` seam")
+    ap.add_argument("--bruker-dda", help="build the Bruker DDA-PASEF .d pipeline (timsim-render --dda) against "
+                                         "this reference .d — top-N selection, searched by Sage (not DiaNN)")
+    ap.add_argument("--dda-precursors-every", type=int, default=10, help="DDA: MS1 survey every Nth frame")
+    ap.add_argument("--dda-max-precursors", type=int, default=25, help="DDA: max precursors per MS2 (PASEF) frame")
+    ap.add_argument("--dda-exclusion-width", type=int, default=25, help="DDA: dynamic-exclusion window (frames)")
     ap.add_argument("--sciex", action="store_true", help="build the LEAN v2 SCIEX ZenoTOF SWATH -> open mzML "
                                                          "pipeline (timsim-render-sciex) — imspy-free, no .wiff")
     ap.add_argument("--sciex-gradient-s", type=float, default=1800.0, help="SCIEX SWATH gradient length (s)")
@@ -1064,7 +1219,11 @@ def main() -> None:
         search_fasta=a.search_fasta,
         qvalue=a.qvalue,
         search_threads=a.search_threads,
-        reference_d=a.bruker_reference,
+        reference_d=a.bruker_reference or a.bruker_dda,
+        # Bruker DDA-PASEF selection params
+        dda_precursors_every=a.dda_precursors_every,
+        dda_max_precursors=a.dda_max_precursors,
+        dda_exclusion_width=a.dda_exclusion_width,
         # SCIEX SWATH schedule (synthesised — no .wiff)
         gradient_length_s=a.sciex_gradient_s,
         cycle_time_s=a.sciex_cycle_s,
@@ -1077,6 +1236,8 @@ def main() -> None:
         build = timsim_sciex_pipeline
     elif a.thermo_template:
         build = timsim_thermo_pipeline
+    elif a.bruker_dda:
+        build = timsim_bruker_dda_pipeline
     elif a.bruker_reference:
         build = timsim_bruker_v2_pipeline
     else:
