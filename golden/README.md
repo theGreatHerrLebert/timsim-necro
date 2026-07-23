@@ -1,11 +1,18 @@
 # golden — the regression gate
 
-A small, frozen reference experiment that both closed loops run end to end, so every change to the
-pipeline lands against a **number** instead of a vibe. This is the spine of driving v2 toward v1 parity
-without regressing: port a capability, run the gate, see whether detectable recall / FDP moved the way
-you predicted — and whether anything else moved that shouldn't have.
+A small, frozen reference experiment that lands every change against a **number** instead of a vibe — the
+spine of driving v2 toward v1 parity without regressing. The render's answer key is a *fixed oracle*;
+which side you hold still decides what the number measures, so the gate has **two axes**:
 
-## What it runs
+| axis | fix | vary | catches |
+|---|---|---|---|
+| **sim** (default) | the tool (DiaNN) | the render / predictors / schema | simulation-realism regressions |
+| **tool** (`--tool-axis`) | a frozen rendered dataset | the search engine / its version | tool regressions + cross-engine benchmarks |
+
+They agree where they overlap: the tool axis run with DiaNN on the sim axis's own render reproduces the
+sim-axis number **exactly** (Δ 0.00 pp) — a clean slice, and a correctness check on the freeze.
+
+## Sim axis — is the simulation getting more realistic?
 
 The same 60-protein experiment through **both** measurement paths, each closing structure → render →
 search → score:
@@ -13,25 +20,39 @@ search → score:
 - **Thermo `.raw` DIA** — `render_thermo` → DiaNN (native via .NET) → `timsim_eval` score
 - **Bruker `.d` DIA** — the lean `timsim-render` → DiaNN (native, no .NET) → the same score
 
-Because the DAG is content-addressed, the two loops **share their whole feature space** (digest → … →
-spectra); it is computed once and only ccs (Bruker) + render + search + score differ. One gate run ≈ one
-pipeline's worth of compute, not two.
-
-## Use
+The DAG is content-addressed, so within a run the two loops **share their whole feature space** (digest →
+… → spectra) — computed once; only ccs (Bruker) + render + search + score differ. But content-addressing
+keys on inputs/config/command, **not the binary**, so a rebuilt render binary at the same path would be a
+cache hit. To read *current* code the sim axis **wipes the work dir each run** (use `--no-clean` only when
+iterating and you don't need a true reading).
 
 ```bash
-./run.sh                    # run both loops, diff vs baseline.json, append to history.jsonl
-./run.sh --only bruker      # one instrument (e.g. while tuning the Bruker render)
-./run.sh --update-baseline  # rerun and REWRITE the baseline — do this deliberately, after a change
-                            #   you've decided is the new reference (and say so in the commit)
+./run.sh                       # both loops, diff baseline.sim_axis, append history.jsonl
+./run.sh --only bruker         # one instrument (e.g. tuning the Bruker render)
+./run.sh --update-baseline     # rerun and REWRITE baseline.sim_axis — deliberately, and say so in the commit
 ```
 
-Exit code is **1 on a regression** (detectable recall drops or FDP rises past 0.3 pp), so the gate drops
-straight into CI or a pre-commit check. Example:
+## Tool axis — did the software regress / which tool wins?
+
+Freeze a render you trust once, then run *only* search→score against it — cheap (~1–2 min, no
+re-simulation), and it isolates the software from the simulation.
+
+```bash
+./run.sh --freeze                          # snapshot current renders as the frozen dataset (after a sim run)
+./run.sh --tool-axis --tool diann          # DiaNN on the frozen dataset, diff baseline.tool_axis
+./run.sh --tool-axis --tool diann --only bruker --update-baseline
+```
+
+Use it to (a) regression-test a DiaNN version bump (swap the binary, rerun), and (b) benchmark engines
+head-to-head — `sage` / `fragpipe` slot into `gate.py`'s `TOOLS` registry via `timsim_eval`'s
+`sage_executor` / `fragpipe_executor` (DiaNN is wired; the others are named slots).
+
+Exit code is **1 on a regression** (detectable recall drops or FDP rises past 0.3 pp) on either axis, so
+the gate drops straight into CI or a pre-commit check. Example:
 
 ```
-  Thermo DIA  recall(det)  58.3% ->  58.3% [no change]           FDP 1.63% -> 1.63% [no change]
-  Bruker DIA  recall(det)  19.7% ->  24.9% [improved +5.2pp]     FDP 2.31% -> 2.10% [improved -0.2pp]
+  Thermo DIA  recall(det)  88.2% ->  88.2% [no change]         FDP 1.04% -> 1.04% [no change]
+  Bruker DIA  recall(det)  26.6% ->  31.8% [improved +5.2pp]   FDP 0.87% -> 0.80% [improved -0.1pp]
 
   ✓ no regression vs baseline.
 ```
@@ -44,11 +65,15 @@ config/                 the FROZEN small inputs — version-pinned so the baseli
   proteome.toml.tmpl      proteome spec template (gate.py fills in the FASTA path — portable)
   mods_basic.toml         fixed carbamidomethyl + light oxidation (no PTM combinatorics)
   tiny_design.toml        single-organism, 50 proteins expressed
-gate.py                 the harness: run both loops, parse metrics, diff baseline, log history
+gate.py                 the harness: sim axis + freeze + tool axis; parse metrics, diff baseline, log
 run.sh                  env wrapper (venv + TIMSIM_BIN + DiaNN/.NET), then gate.py
-baseline.json           the pinned reference metrics (per instrument)
-history.jsonl           append-only log of every run: {ts, commit, thermo{...}, bruker{...}}
+baseline.json           pinned reference: {sim_axis:{thermo,bruker}, tool_axis:{inst:{tool}}}
+dataset.json            manifest of the frozen tool-axis dataset (paths + content hashes)
+history.jsonl           append-only run log (gitignored — per-machine telemetry)
 ```
+
+The frozen dataset itself (`GOLDEN_DATASET`, ~0.9 GB of `.raw`/`.d` + truth) lives outside git; only its
+`dataset.json` manifest is committed.
 
 ## The big templates are not committed
 
