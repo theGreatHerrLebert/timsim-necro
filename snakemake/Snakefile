@@ -1,0 +1,103 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# timsim v2 — a Snakemake port of the necroflow DAG (../flow/timsim_flow.py).
+#
+# WHY THIS EXISTS
+#   flow/timsim_flow.py expresses the simulator as a necroflow DAG whose whole thesis is a cache
+#   model, not a cross product:
+#
+#       STRUCTURE   which molecules exist          computed ONCE, shared by every sample
+#       QUANTITY    how much of each, per sample   the design; also computed once for the whole design
+#       MEASUREMENT how it is observed, per run    one node per sample — the fan-out
+#
+#   necroflow gets the dedup from a content-addressed fingerprint. Snakemake gets the SAME dedup for
+#   free from the shape of the graph: a rule with no `{sample}` wildcard has one output path, so it
+#   runs once no matter how many samples request it. Everything above the measurement node here is
+#   wildcard-free; only the measurement rule (and its downstream search/score) carries `{sample}`.
+#
+#       proteome ─┬─ digest ─┬─ modify ── precursors ─┐
+#                 │          │                        │
+#                 │          └──── (ccs, rt) ─────────┼── frag_input ─ fragments ─ spectra ┐
+#                 └─ design ── yield ─────────────────┘                                    │
+#                                        └──────────────────────── render_<backend>(sample) × N
+#
+#   The necroflow `hashes_file` invalidators (which hash a spec FILE's content so an edited mixture
+#   goes stale) become ordinary Snakemake input edges here: the spec TOMLs are declared as `input:`,
+#   so Snakemake restages exactly the rules that read a file when its content changes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import os
+from pathlib import Path
+
+configfile: "config.yaml"
+
+# ── resolve the config into module-level constants the rule files close over ──
+OUT     = config["outdir"]
+STRUCT  = f"{OUT}/structure"      # STRUCTURE + shared spectral prediction (wildcard-free)
+QUANT   = f"{OUT}/quant"          # QUANTITY: the whole-design tables (wildcard-free)
+
+CONFIGS = Path(config["configs_dir"])
+def _spec(name):
+    return str(CONFIGS / name)
+
+PROTEOME_SPEC = _spec(config["proteome_spec"])
+MODS_SPEC     = _spec(config["mods"])
+DESIGN_SPEC   = _spec(config["design_spec"])
+V1_CONFIG     = _spec(config["timsim_config"])
+
+SAMPLES = config["samples"]
+BACKEND = config["backend"]
+SEARCH_FASTA = config.get("search_fasta")   # None → stop at the rendered run + truth
+
+# Expand ~ in the external-tool paths so `{config[...]}` interpolates a usable path in shell blocks.
+config["diann"]       = os.path.expanduser(config["diann"])
+config["dotnet_root"] = os.path.expanduser(config["dotnet_root"])
+
+# A missing backend template/reference is a configuration error, not a cache miss — fail loudly,
+# the same stance the necroflow invalidators take (a missing referenced file raises at build time).
+if BACKEND == "thermo" and not config.get("template"):
+    raise WorkflowError("backend 'thermo' needs `template:` (the Thermo .raw template) in config.yaml")
+if BACKEND == "bruker" and not config.get("reference_d"):
+    raise WorkflowError("backend 'bruker' needs `reference_d:` (the reference DIA .d) in config.yaml")
+
+wildcard_constraints:
+    sample = r"[^/]+"
+
+# ── the rule modules (one file per axis / backend — the 'modular workflow') ───
+include: "rules/structure.smk"   # proteome, digest, modify, precursors, ccs, rt, frag_input, fragments, spectra
+include: "rules/quant.smk"       # design, peptide_yield
+include: "rules/v1.smk"          # simulate            (backend: v1)
+include: "rules/thermo.smk"      # render_thermo + search + score   (backend: thermo)
+include: "rules/bruker.smk"      # render + search_bruker + score_bruker (backend: bruker)
+include: "rules/sciex.smk"       # render_sciex        (backend: sciex)
+
+
+# ── the terminal deliverables, per backend (mirrors main()'s `req` assembly) ──
+def terminal_targets():
+    t = []
+    for s in SAMPLES:
+        if BACKEND == "thermo":
+            t += [f"{OUT}/thermo/{s}/data.raw",
+                  f"{OUT}/thermo/{s}/truth.parquet",
+                  f"{OUT}/thermo/{s}/manifest.json"]
+            if SEARCH_FASTA:
+                t.append(f"{OUT}/thermo/{s}/metrics.json")
+        elif BACKEND == "bruker":
+            t += [f"{OUT}/bruker/{s}/data.d",
+                  f"{OUT}/bruker/{s}/truth.parquet"]
+            if SEARCH_FASTA:
+                t.append(f"{OUT}/bruker/{s}/metrics.json")
+        elif BACKEND == "sciex":
+            t += [f"{OUT}/sciex/{s}/sciex.mzML",
+                  f"{OUT}/sciex/{s}/truth.parquet"]
+            if SEARCH_FASTA:
+                t.append(f"{OUT}/sciex/{s}/metrics.json")
+        elif BACKEND == "v1":
+            t += [f"{OUT}/v1/{s}/raw"]
+        else:
+            raise WorkflowError(f"unknown backend {BACKEND!r} (v1 | thermo | bruker | sciex)")
+    return t
+
+
+rule all:
+    input:
+        terminal_targets()

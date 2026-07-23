@@ -1,0 +1,65 @@
+# timsim v2 — Snakemake port of the necroflow DAG (flow/timsim_flow.py).
+#
+# This file is the single knob-board for a run. It mirrors, one-for-one, the `SimpleNamespace`
+# that flow/timsim_flow.py builds in main() from its argparse defaults — so a Snakemake run and a
+# necroflow run of the same backend issue byte-identical tool invocations.
+
+# ── where things live ────────────────────────────────────────────────────────
+outdir:       "results"          # all artifacts land here (see the layout in README.md)
+configs_dir:  "../flow/configs"  # the shared run configs (design*.toml, hye.toml, mods*.toml, ...)
+timsim_bin:   "target/release"   # dir holding the Rust `timsim-*` bins (crate: timsim-cli). Python
+                                 # prediction tools (timsim-ccs/rt/fragments) + the v1 `timsim`
+                                 # monolith are taken from PATH, exactly as in the necroflow file.
+
+# ── which measurement backend to build (the four branches of main()) ──────────
+#   v1      → Bruker .d via the monolithic v1 `timsim` seam        (owns DDA)
+#   thermo  → Thermo .raw authored into a template  (--thermo-template)     [needs `template`]
+#   bruker  → lean v2 Bruker .d projected onto a reference .d (--bruker-reference) [needs `reference_d`]
+#   sciex   → lean v2 SCIEX ZenoTOF SWATH → open mzML (--sciex)   [synthesised SWATH schedule, no .wiff]
+backend:  "thermo"
+
+samples:  ["A_R1", "B_R1"]       # the fan-out. Everything above the measurement node is shared.
+
+# ── STRUCTURE + QUANTITY specs (the sample-independent axes) ──────────────────
+# Filenames are resolved against `configs_dir`. These are declared as rule INPUTS, so editing one
+# restages exactly the nodes that read it — the content-based invalidation the necroflow
+# `hashes_file` invalidators provide, expressed as an honest dependency edge.
+proteome_spec: "hye.toml"        # multi-FASTA proteome spec (organism is a declared column)
+mods:          "mods.toml"       # per-site occupancy modification spec (read by modify AND yield)
+design_spec:   "design.toml"     # the experiment design / mixture (QUANTITY)
+timsim_config: "v1.toml"         # the v1 monolith config (backend: v1 only)
+
+# ── digest / structure parameters ─────────────────────────────────────────────
+max_missed_cleavages: 2
+min_length:           7
+max_length:           30
+floor:                0.001
+charge_model:         "site-specific"
+digestion_efficiency: 0.9
+seed:                 41
+
+# ── measurement parameters ─────────────────────────────────────────────────────
+frag_model:       ""             # "" = local timsTOF model; "koina:Prosit_2020_intensity_HCD" = HCD
+collision_energy: 25.0
+intensity_scale:  500000.0
+method:           "DIA"          # thermo acquisition method
+
+# SCIEX synthesised SWATH schedule (backend: sciex). No .wiff — these params ARE the schedule.
+sciex_gradient_s:   1800.0       # gradient length (s)
+sciex_cycle_s:      3.0          # SWATH cycle time (s)
+sciex_mz_min:       400.0        # window coverage min m/z
+sciex_mz_max:       1200.0       # window coverage max m/z
+sciex_window_width: 25.0         # isolation window width (Th)
+
+# External templates/references (host-specific absolute paths; set the one your backend needs).
+template:    null                # backend: thermo — the Thermo .raw template file
+reference_d: null                # backend: bruker — the reference DIA .d (its analysis.tdf is hashed)
+
+# ── phase 2: search + score (opt-in; thermo & bruker only) ────────────────────
+# Set search_fasta to a FASTA to append DiaNN search → score against the render's answer key.
+# Leave null to stop at the rendered run + truth.
+search_fasta:   null
+qvalue:         0.01
+search_threads: 16
+diann:          "/home/administrator/dia-nn/diann-2.5.0/diann-linux"
+dotnet_root:    "~/.dotnet"      # .NET 8 runtime — DiaNN needs it to read Thermo .raw natively
