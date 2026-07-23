@@ -82,6 +82,8 @@ render has a DDA mode but the default path is still the monolith) and **SCIEX** 
 ```
 flow/timsim_flow.py     the DAG (nodes, typed edges, command wiring)
 flow/configs/           run configs (design*.toml, hela*.toml, hye.toml, sciex.toml, mods*.toml, fasta)
-requirements.txt        the lean Python dependency surface (necroflow + timsim-predict)
+golden/                 the regression gate — a frozen 60-protein run scored two ways (sim realism +
+                        tool benchmark) against its own answer key; `golden/run.sh`, see golden/README.md
+requirements.txt        the lean Python dependency surface (necroflow + timsim-predict + timsim-eval)
 Makefile                predict-deps / rust-bins / setup
 ```
