@@ -21,14 +21,14 @@ matched the timsTOF core AND gone beyond it:
 
 ## P0 — MUST (the core realism + the top-two use cases)
 
-1. **Noise model.** THE linchpin. Every FDP we measure is suspiciously clean (0.17–1.4%), but v1's
-   *headline* is that nominal-1% FDR is really **3–5% true FDR** — and we can't reproduce that because
-   we're **noiseless**. Noise isn't a sample type; it's what makes FDP realistic on *every* instrument.
-   Port in order of value/effort: (a) **m/z-ppm scatter** on precursor+fragment peaks (easy, all
-   instruments); (b) **real-data-noise injection** — sample real background peaks from the reference `.d`
-   and add them per frame (moderate, Bruker; the v1 machinery is `add_noise_from_real_data.py`); (c)
-   synthetic chemical/baseline (Poisson/shot) if (a)+(b) don't suffice. **Without this our FDPs are a
-   fiction.**
+1. **Realism: noise + spike-into-real** — the linchpin. Full design in **`REALISM_PLAN.md`**. Our clean
+   FDPs (0.17–1.4%) reflect BOTH a noiseless render AND DiaNN 2.5 being well-calibrated. v1's FDR-inflation
+   headline was **tool-specific** (Spectronaut on modifications; DiaNN 1.8's big discrepancies — neither
+   tested here), so reproducing it needs noise **and** the tool axis (run the old versions). Noise is still
+   P0: (a) **m/z-ppm scatter** (easy, all instruments); (b) **real-data-noise injection** from the
+   reference `.d` (moderate, Bruker); (c) **spike-into-real-experiment** (`superimpose_on_reference`) —
+   overlay synthetic ground-truth onto a *real* run, the strongest realism mode (elevated from P2 per
+   David; only the spikes are labeled → needs a spike-recovery eval mode).
 2. **HYE quant + fold-change eval.** The second-most-cited v1 axis, and cheap: the proteome is already
    configurable (`hye.toml`, HUMAN/YEAST/ECOLI). Needs (i) repoint FASTA paths (they broke when
    `SUBMISSION/zenodo` was cleared), (ii) a multi-condition design with the dilution ratios
@@ -51,7 +51,8 @@ matched the timsTOF core AND gone beyond it:
    scheme, binomial 1+ charge. A distinct paper axis but narrow audience.
 6. **MBR (match-between-runs).** Multi-run design + false-transfer eval (the PIP-ECHO split). Specialized
    DDA analysis; valuable but self-contained.
-7. **Spike-in / overlay** (`superimpose_on_reference`): real background `.d` ⊕ synthetic. Plasma/PYE.
+7. *(Plasma/PYE sample scenario — the spike-into-real *mechanism* is now P0 (`REALISM_PLAN.md`); Plasma/PYE
+   is just a specific sample to apply it to.)*
 
 ## DROP — don't port (v1 plumbing, cosmetic, or superseded)
 
