@@ -18,8 +18,8 @@ necroflow (typed DAG framework)                         ← orchestration
       ▼
 ┌─────────────── the simulator's steps ───────────────┐
 │ structure/render (Rust bins):  timsim-proteome/digest/design/precursors/
-│                                yield/modify/frag-input/spectra/
-│                                render-thermo (Thermo .raw) / render (Bruker .d, v2)
+│                                yield/modify/frag-input/spectra/  render-thermo (.raw) /
+│                                render (Bruker .d, v2) / render-sciex (SWATH mzML, v2)
 │ prediction (Python, LEAN):     timsim-ccs / timsim-rt / timsim-fragments
 │                                   └─ timsim-predict → pepdl → mscorepy
 │                                      (mscore + ms-chem pyo3 primitives; imspy-free)
@@ -71,12 +71,17 @@ python flow/timsim_flow.py --help         # drive the DAG
   authors a valid 3000-frame DIA `.d` (177 MS1 + 2823 MS2), a 42,919-row truth, DiaNN searches it as
   Slice-PASEF, and the scorer reports a monotonic recall-by-abundance ladder. The default Bruker path
   (no flag) still uses the v1 `timsim` monolith (imspy) because it owns **DDA**; lean v2 covers DIA.
-- **SCIEX mzML** (`--sciex-config`) — still the v1 `timsim` build-from-`.wiff` (imspy); no native v2
-  SCIEX renderer exists.
+- **SCIEX mzML** (`--sciex`) — **lean v2**: the same feature-space chain → `timsim-render-sciex`, which
+  projects onto a **synthesised SWATH schedule** and writes open **mzML** via `timsim-core` (mzdata) — no
+  `.wiff`, no `sciexwiff`/`sciex-io` (legally clean). Co-emits the answer key; with `--search-fasta` the
+  DAG appends `search_sciex` (DiaNN reads open mzML natively) + `score_sciex`, so SCIEX closes
+  structure → render → search → score like the others. Verified end-to-end (fresh sim through necro):
+  84.4% detectable recall, FDP 0.81%, monotonic ladder — on par with Thermo. (Native `.wiff` output is a
+  separate rustims-local satellite reusing the validated `sciexwiff` writer.)
 
-**Thermo and Bruker DIA both close structure → render → search → score** on small, independently-versioned
-federated repos — zero imspy, zero rustims. The two remaining v1 touchpoints are **Bruker DDA** (the v2
-render has a DDA mode but the default path is still the monolith) and **SCIEX** (no native v2 renderer).
+**Thermo, Bruker DIA, and SCIEX all close structure → render → search → score** on small,
+independently-versioned federated repos — zero imspy, zero rustims. The one remaining v1 touchpoint is
+**Bruker DDA** (the v2 render has a DDA mode, but the default Bruker path is still the monolith).
 
 ## Layout
 ```
