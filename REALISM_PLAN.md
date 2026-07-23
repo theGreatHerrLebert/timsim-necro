@@ -107,8 +107,10 @@ real run IS the noise).
    baseline; nonzero shifts the mass-error distribution DiaNN calibrates against (Gaussian sd `mz·ppm/3e6`,
    reproducing v1). A1 alone won't reproduce v1's headline — that needs **A2 (below)** for the real
    background **and** the **tool axis** (Spectronaut + DiaNN 1.8 on the noised data; DiaNN 2.5 alone may
-   stay clean, itself a finding). Remaining A1 wiring: expose the flags through the necroflow render node +
-   run config so a pipeline/golden run can turn it on.
+   stay clean, itself a finding). **Wired through the flow** (`--noise-mz-ppm/-frag-ppm/-mz-uniform/-seed`
+   on the pipeline CLI → `render_noise_flags(cfg)` → the Bruker DIA `render` node; off ⇒ byte-identical
+   command ⇒ caches unaffected). Bruker DIA only for now — Thermo/SCIEX/DDA render bins need the same noise
+   closure to gain it.
 2. **A2 (real-data noise) — the parity-completing piece.** The real v1 DIA recipe runs A1 **and** A2
    together (`add_real_data_noise=true`), so this is what closes true v1 parity, not A1 alone. Bruker;
    sample real background peaks from the reference `.d` (`reference_noise_intensity_max`,
