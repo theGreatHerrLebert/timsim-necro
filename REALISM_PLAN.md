@@ -23,7 +23,7 @@ of each — signal-m/z **and** real-data-background — together:
 |---|---|---|---|
 | `mz_noise_precursor/fragment` + `_ppm`, `mz_noise_uniform` | **signal** — m/z position scatter | **A1** ✅ | ON: Gaussian, 6.5 ppm |
 | `detection_noise` (isotopes.py `add_detection_noise`) | **signal** — intensity shot noise | — (skip) | OFF (isotope-gen only) |
-| `add_real_data_noise` (+ `reference_noise_intensity_max`, `num_*_noise_frames`) | **background** — real peaks from the ref `.d` | **A2** | ON |
+| `add_real_data_noise` (+ `reference_noise_intensity_max`, `num_*_noise_frames`) | **background** — real peaks from the ref `.d` | **A2** ✅ | ON |
 | `baseline_shot_noise` (noise.py) | **background** — synthetic baseline | **A3** | unwired / legacy |
 | `noise_frame/scan_abundance` | abundance | dropped | OFF |
 
@@ -61,12 +61,21 @@ distribution to calibrate against. Matched to v1's `mscore::add_mz_noise_normal/
 - Applied in the projection closure; the noiseless path (`--noise-mz-ppm 0`) stays byte-identical (verified:
   hash unchanged vs the frozen baseline). Unit tests pin N(0,1)/U(−1,1) shape + MS1/MS2 key independence.
 
-**A2. Real-data-noise injection (moderate, Bruker).** Sample **actual background peaks from the reference
-`.d`** and add them per frame — window-group-aware for MS2. This is the realistic chemical/electronic
-background. We already open the reference for calibration; extend to read its real `(scan, tof, intensity)`
-per frame, sample a fraction (`--noise-sample-fraction`, cap `--noise-intensity-max`), deposit.
-- Bruker-only (needs the reference's real data); Thermo/SCIEX get A1 (ppm) only for now.
-- The v1 mechanism (`sample_precursor_signal` / `sample_fragment_signal`) is the reference.
+**A2. Real-data-noise injection (Bruker). ✅ DONE — checked against v1 (`timsim-cli` 4b0aaf4).** Sample
+**actual background peaks from the reference `.d`** and add them per frame — window-group-aware for MS2.
+The realistic chemical/electronic background; the piece that (with A1) reproduces v1's real DIA recipe.
+- Flags: `--noise-real-data` + `--noise-{precursor,fragment}-frames` (v1 5), `--noise-intensity-max` (v1
+  cap 150000, absolute counts), `--noise-{precursor,fragment}-fraction` (v1 0.2); reuse `--noise-seed`.
+- **v1 match** (`add_real_data_noise_to_frames` DIA branch + mscore `filter_ranged`/`generate_random_sample`,
+  reused verbatim): per output frame sample N reference frames of the matching type (MS1, or MS2 of the same
+  DIA window group — classified via the schedule, pools from reference metadata), keep peaks with intensity
+  in `[1, cap]`, downsample by the fraction, add **real detector counts** on top of the scaled synthetic
+  signal (== v1's `frame + noise`; injected post-scale in `dedup_and_quantise`).
+- **Deliberate divergence:** seeded (v1 is `thread_rng`) on `(output_frame, sample_slot, peak)` so it's
+  reproducible for the gate — distributional/logic parity, not byte parity, with v1. Grid-safe; each unique
+  reference frame decoded+filtered once (cached). Off ⇒ byte-identical to the noiseless baseline (verified).
+- Bruker-only (needs the reference's real data); Thermo/SCIEX get A1 (ppm) only. Known cost: the cache is
+  memory-heavy on dense references (~3GB in test) — streaming per-chunk is a future optimization.
 
 **A3. Synthetic chemical/baseline (optional).** Poisson-count baseline peaks, uniform m/z, exponential
 intensities (`noise.py`). Only if A1+A2 leave the background too clean, or for no-reference renders.
@@ -111,10 +120,11 @@ real run IS the noise).
    on the pipeline CLI → `render_noise_flags(cfg)` → the Bruker DIA `render` node; off ⇒ byte-identical
    command ⇒ caches unaffected). Bruker DIA only for now — Thermo/SCIEX/DDA render bins need the same noise
    closure to gain it.
-2. **A2 (real-data noise) — the parity-completing piece.** The real v1 DIA recipe runs A1 **and** A2
-   together (`add_real_data_noise=true`), so this is what closes true v1 parity, not A1 alone. Bruker;
-   sample real background peaks from the reference `.d` (`reference_noise_intensity_max`,
-   `num_*_noise_frames`). Validate the sampled peaks land in-frame and FDP moves toward v1's 3–5%.
+2. **A2 (real-data noise) ✅ DONE + v1-matched + flow-wired.** Reuses v1's own mscore primitives
+   (`filter_ranged`/`generate_random_sample`); off ⇒ byte-identical, on ⇒ deterministic. A1 + A2 together
+   now reproduce v1's real DIA recipe. **Remaining empirical step:** run a *searched* pipeline with
+   `--noise-real-data --noise-mz-ppm 6.5` and confirm measured FDP moves toward v1's 3–5% (best done on the
+   golden gate's real fixture; needs DiaNN). Optional: memory-streaming the A2 cache for full-scale runs.
 3. **B (spike-into-real)** — the additive-onto-real render + the spike-recovery eval mode. Validate: the
    real `.d`'s peaks are preserved and a known spike is recoverable in the real matrix.
 

@@ -369,18 +369,32 @@ SAGE_CONFIG = os.environ.get("TIMSIM_SAGE_CONFIG", "/scratch/timsim-demo/SAGEBen
 
 
 def render_noise_flags(cfg) -> str:
-    """A1 signal-m/z noise CLI (`timsim-render`), rendered as a suffix appended to the render command.
-    Returns "" when noise is off so the command — and thus the necroflow fingerprint — is byte-identical
-    to a noiseless run (existing caches stay valid). A nonzero precursor OR fragment ppm turns it on;
-    ppm is v1's 3σ envelope (`--noise-mz-ppm 6.5` == v1's real DIA config). See REALISM_PLAN.md."""
+    """Noise CLI (`timsim-render`) rendered as a suffix on the render command. Returns "" when ALL noise is
+    off so the command — and thus the necroflow fingerprint — is byte-identical to a noiseless run (existing
+    caches stay valid). Two layers, off by default (REALISM_PLAN.md):
+      A1 signal-m/z: nonzero `--noise-mz-ppm`/`--noise-frag-ppm` (v1 3σ envelope; 6.5 == v1's real config).
+      A2 real-data background: `--noise-real-data` (sample real peaks from the reference `.d`).
+    v1's real DIA recipe runs both together."""
     mz = getattr(cfg, "noise_mz_ppm", 0.0)
     frag = getattr(cfg, "noise_frag_ppm", 0.0)
-    if not mz and not frag:
+    real = getattr(cfg, "noise_real_data", False)
+    if not mz and not frag and not real:
         return ""
-    parts = [f"--noise-mz-ppm {mz}", f"--noise-frag-ppm {frag}",
-             f"--noise-seed {getattr(cfg, 'noise_seed', 0)}"]
-    if getattr(cfg, "noise_mz_uniform", False):
-        parts.append("--noise-mz-uniform")
+    parts = []
+    if mz or frag:  # A1 signal-m/z scatter
+        parts += [f"--noise-mz-ppm {mz}", f"--noise-frag-ppm {frag}"]
+        if getattr(cfg, "noise_mz_uniform", False):
+            parts.append("--noise-mz-uniform")
+    if real:  # A2 real-data background from the reference .d
+        parts += [
+            "--noise-real-data",
+            f"--noise-precursor-frames {getattr(cfg, 'noise_precursor_frames', 5)}",
+            f"--noise-fragment-frames {getattr(cfg, 'noise_fragment_frames', 5)}",
+            f"--noise-intensity-max {getattr(cfg, 'noise_intensity_max', 150000.0)}",
+            f"--noise-precursor-fraction {getattr(cfg, 'noise_precursor_fraction', 0.2)}",
+            f"--noise-fragment-fraction {getattr(cfg, 'noise_fragment_fraction', 0.2)}",
+        ]
+    parts.append(f"--noise-seed {getattr(cfg, 'noise_seed', 0)}")
     return " " + " ".join(parts)
 
 
@@ -1218,7 +1232,21 @@ def main() -> None:
                     help="A1: m/z scatter on fragment (MS2) peaks, ppm 3σ envelope. 0=off")
     ap.add_argument("--noise-mz-uniform", action="store_true",
                     help="A1: use v1's uniform m/z scatter (mz ± mz·ppm/1e6) instead of the default Gaussian")
-    ap.add_argument("--noise-seed", type=int, default=0, help="A1: seed for the (deterministic) noise draws")
+    ap.add_argument("--noise-seed", type=int, default=0, help="seed for the (deterministic) noise draws")
+    # A2 real-data background (Bruker DIA): sample real peaks from the reference .d (v1 add_real_data_noise).
+    # v1's real DIA recipe runs A1 + A2 together; --noise-real-data + a nonzero --noise-mz-ppm reproduces it.
+    ap.add_argument("--noise-real-data", action="store_true",
+                    help="A2: inject real background peaks sampled from the reference .d onto the frames")
+    ap.add_argument("--noise-precursor-frames", type=int, default=5,
+                    help="A2: reference MS1 frames sampled per output precursor frame (v1 5)")
+    ap.add_argument("--noise-fragment-frames", type=int, default=5,
+                    help="A2: reference MS2 frames sampled per output fragment frame (v1 5)")
+    ap.add_argument("--noise-intensity-max", type=float, default=150000.0,
+                    help="A2: background intensity cap in absolute counts (v1 reference_noise_intensity_max)")
+    ap.add_argument("--noise-precursor-fraction", type=float, default=0.2,
+                    help="A2: keep probability per sampled MS1 background peak (v1 0.2)")
+    ap.add_argument("--noise-fragment-fraction", type=float, default=0.2,
+                    help="A2: keep probability per sampled MS2 background peak (v1 0.2)")
     ap.add_argument("--search-fasta", default=None,
                     help="opt into phase 2: DiaNN-search the rendered .raw against this FASTA, then score "
                          "against the answer key. Omit to stop at the .raw.")
@@ -1247,6 +1275,12 @@ def main() -> None:
         noise_frag_ppm=a.noise_frag_ppm,
         noise_mz_uniform=a.noise_mz_uniform,
         noise_seed=a.noise_seed,
+        noise_real_data=a.noise_real_data,
+        noise_precursor_frames=a.noise_precursor_frames,
+        noise_fragment_frames=a.noise_fragment_frames,
+        noise_intensity_max=a.noise_intensity_max,
+        noise_precursor_fraction=a.noise_precursor_fraction,
+        noise_fragment_fraction=a.noise_fragment_fraction,
         search_fasta=a.search_fasta,
         qvalue=a.qvalue,
         search_threads=a.search_threads,
