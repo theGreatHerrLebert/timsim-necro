@@ -18,7 +18,8 @@ necroflow (typed DAG framework)                         ← orchestration
       ▼
 ┌─────────────── the simulator's steps ───────────────┐
 │ structure/render (Rust bins):  timsim-proteome/digest/design/precursors/
-│                                yield/modify/frag-input/spectra/render-thermo
+│                                yield/modify/frag-input/spectra/
+│                                render-thermo (Thermo .raw) / render (Bruker .d, v2)
 │ prediction (Python, LEAN):     timsim-ccs / timsim-rt / timsim-fragments
 │                                   └─ timsim-predict → pepdl → mscorepy
 │                                      (mscore + ms-chem pyo3 primitives; imspy-free)
@@ -59,8 +60,20 @@ python flow/timsim_flow.py --help         # drive the DAG
   The SCORE node (`timsim_eval.v2_thermo_eval`) parses the DiaNN report and compares it to the render's
   ground-truth manifest. Pure-Python, **imspy-free** on the DiaNN path — the last imspy touchpoint is cut.
 
-**No gaps left** — the entire DAG (structure → prediction → render → search → score) ingests only small,
-independently-versioned federated repos. Zero imspy, zero rustims monorepo.
+**Render backends**
+- **Thermo `.raw`** (`--thermo-template`) — lean: `frag_input → fragments → spectra → render-thermo`
+  (timsim-cli). Co-emits the answer key + manifest → the phase-2 DiaNN `search`/`score` closes on it.
+- **Bruker `.d`** (`--bruker-reference <ref.d>`) — **lean v2**: the same feature-space chain plus CCS →
+  `timsim-render`, a streaming imspy-free projector onto a reference `.d`'s DIA schedule. Verified: a
+  60-protein run authors a valid 3000-frame DIA `.d` (177 MS1 + 2823 MS2, 15k windows). The default
+  Bruker path (no flag) still uses the v1 `timsim` monolith (imspy) — it owns DDA and the DIA truth
+  output v2 does not emit yet, so scored Bruker runs stay on v1 until `run_dia` writes an answer key.
+- **SCIEX mzML** (`--sciex-config`) — still the v1 `timsim` build-from-`.wiff` (imspy); no native v2
+  SCIEX renderer exists.
+
+**No gaps left on the Thermo path** — structure → prediction → render → search → score ingests only small,
+independently-versioned federated repos, zero imspy / zero rustims. The lean Bruker `.d` render is wired
+and verified; Bruker-DIA scoring and SCIEX remain the two v1 touchpoints.
 
 ## Layout
 ```

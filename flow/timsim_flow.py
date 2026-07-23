@@ -90,6 +90,23 @@ def hashes_sciex_config(config_key: str):
     return token
 
 
+def hashes_reference_d(config_key: str):
+    """Invalidate a v2 Bruker render when its reference `.d` changes. The `.d` is a DIRECTORY (and often
+    multi-GB), so — like `hashes_sciex_config` folds in the `.wiff` — hash the cheap `analysis.tdf`
+    metadata DB inside it: that SQLite file carries the frame schedule, DIA windows and TOF/mobility
+    calibration the render actually reads to place ions. Swap or edit the reference and the token moves;
+    a missing reference is not a cache hit."""
+
+    def token(node) -> str:
+        ref = Path(node.config[config_key])
+        tdf = ref / "analysis.tdf"
+        if not tdf.exists():
+            raise FileNotFoundError(f"reference .d {ref} has no analysis.tdf to hash")
+        return hashlib.sha256(tdf.read_bytes()).hexdigest()
+
+    return token
+
+
 # ── artifacts ────────────────────────────────────────────────────────────────
 #
 # Each NodeType is a *typed artifact*, not a filename. The type is what lets necroflow check that a
@@ -253,6 +270,18 @@ class ThermoRunManifest(NodeType):
     with the `.raw` so a run is reproducible after the fact."""
 
     filename = "manifest.json"
+
+
+class BrukerRawDataV2(NodeType):
+    """A Bruker `.d` authored by the LEAN v2 projector (`timsim-render`) — the streaming, imspy-free render
+    that places the same instrument-independent `ion_spectra` onto a reference `.d`'s acquisition grid. A
+    DISTINCT type from the v1 [`RawData`] (`.d` via the monolithic `timsim` config seam): the v2 render is
+    template-driven (a reference `.d`), so it restages on the reference's `analysis.tdf`, not a config file.
+    NOTE: v2 DIA does not yet co-emit a truth answer key (only DDA does), so this path stops at the `.d` —
+    phase-2 scoring stays on the Thermo path until `run_dia` writes a truth."""
+
+    filename = "data.d"
+    invalidator = hashes_reference_d("reference_d")
 
 
 class SciexMzmlData(NodeType):
@@ -506,6 +535,41 @@ def render_thermo(
     return ThermoRawData[data_raw], ThermoTruth[truth], ThermoRunManifest[manifest]
 
 
+# ── the measurement/render branch (Bruker, WITH ion mobility — the lean v2 projector) ──
+# The imspy-free counterpart of the monolithic v1 `simulate` seam: it reuses the SAME
+# frag_input -> fragments -> spectra feature-space nodes as the Thermo path, then PROJECTS the
+# instrument-independent spectra onto a reference `.d`'s DIA schedule. Bruker has ion mobility, so unlike
+# the Thermo render it consumes `precursor_ccs` (CCS -> 1/K0, Mason-Schamp) — physical mobility a search
+# engine needs. No config TOML: a reference `.d` (`--reference-d`) supplies the acquisition grid.
+
+
+@r.command(
+    f"{BIN}/timsim-render --precursors {{precursors}} --peptide-rt {{peptide_rt}} "
+    "--ion-spectra {ion_spectra} --precursor-ccs {precursor_ccs} "
+    "--peptide-quantities {peptide_quantities} --sample {sample_id} "
+    "--reference-d {reference_d} --dia --intensity-scale {intensity_scale} --out {raw}",
+    threads=2,
+    ram="8Gi",
+)
+def render(
+    precursors: Precursors,
+    peptide_rt: PeptideRT,
+    ion_spectra: IonSpectra,
+    precursor_ccs: PrecursorCCS,
+    peptide_quantities: PeptideQuantities,
+    reference_d: str,
+    sample_id: str,
+    intensity_scale: float,
+):
+    """MEASUREMENT (Bruker, ion-mobility): the lean v2 projector authors a Bruker `.d` by placing the
+    instrument-independent `ion_spectra` onto the reference `.d`'s DIA grid — imspy-free, streaming,
+    memory bounded by the elution set. One node per sample (via `peptide_quantities` + `sample_id`);
+    restages when the reference `.d` changes. `--precursor-ccs` gives each ion physical 1/K0; abundance
+    from `peptide_quantities` restores the real dynamic range. DIA mode gates fragments by the reference's
+    diagonal quadrupole transmission."""
+    return BrukerRawDataV2[raw]
+
+
 # ── SCIEX ZenoTOF SWATH → mzML (no-IMS, template-based, the clean non-native path) ──
 
 
@@ -704,6 +768,59 @@ def timsim_thermo_pipeline(cfg, sample_id: str) -> Pipeline:
     return P
 
 
+def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
+    """One sample to a Bruker `.d`, but via the LEAN v2 projector (`timsim-render`) instead of the
+    monolithic v1 `simulate` seam — imspy-free, same `frag_input -> fragments -> spectra` chain as the
+    Thermo path plus CCS (Bruker has ion mobility). The feature-space nodes are IDENTICAL to the other
+    pipelines (same config -> same fingerprint), so requesting a Bruker-v2, a Thermo and a SCIEX run
+    collapses the whole structure axis to one computation. Opt-in via `--bruker-reference <ref.d>`; the
+    v1 `timsim_pipeline` stays the default (it owns DDA + the DIA truth output v2 does not yet emit)."""
+    P = Pipeline()
+    P.proteome = r.proteome(spec=cfg.proteome_spec)
+    P.peptides, P.occurrences, P.cleavage_sites = r.digest(
+        P.proteome,
+        max_missed_cleavages=cfg.max_missed_cleavages,
+        min_length=cfg.min_length,
+        max_length=cfg.max_length,
+    )
+    P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.precursors = r.precursors(P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.ccs = r.ccs(P.precursors, P.peptides)
+    P.rt = r.rt(P.peptides)
+    P.samples, P.runs, P.sample_run_map, P.protein_quantities = r.design(
+        P.proteome, spec=cfg.design_spec
+    )
+    P.peptide_quantities = r.peptide_yield(
+        P.proteome,
+        P.occurrences,
+        P.cleavage_sites,
+        P.protein_quantities,
+        P.modifications,
+        digestion_efficiency=cfg.digestion_efficiency,
+    )
+    # ── measurement branch: same feature-space nodes as Thermo, then the v2 Bruker projector ──
+    P.fragment_prediction_input = r.frag_input(
+        P.precursors, P.peptides, P.modforms, P.modifications
+    )
+    P.fragment_intensities = r.fragments(
+        P.fragment_prediction_input, collision_energy=cfg.collision_energy, frag_model=cfg.frag_model
+    )
+    P.ion_spectra = r.spectra(
+        P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities
+    )
+    P.raw = r.render(
+        P.precursors,
+        P.rt,
+        P.ion_spectra,
+        P.ccs,
+        P.peptide_quantities,
+        reference_d=cfg.reference_d,
+        sample_id=sample_id,
+        intensity_scale=cfg.intensity_scale,
+    )
+    return P
+
+
 def timsim_sciex_pipeline(cfg, sample_id: str) -> Pipeline:
     """One sample to a SCIEX ZenoTOF SWATH **mzML**, reusing the SAME feature-space nodes as the Bruker and
     Thermo pipelines (so requesting all three collapses the structure to one computation). The measurement
@@ -744,6 +861,8 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--graph", help="write the DAG to this file")
     ap.add_argument("--thermo-template", help="build the Thermo .raw pipeline against this template")
+    ap.add_argument("--bruker-reference", help="build the LEAN v2 Bruker .d pipeline (timsim-render) against "
+                                               "this reference DIA .d — imspy-free, replaces the v1 `simulate` seam")
     ap.add_argument("--sciex-config", help="build the SCIEX ZenoTOF SWATH -> mzML pipeline with this config "
                                            "TOML (instrument/template/CE/model; e.g. sciex.toml)")
     ap.add_argument("--frag-model", default="", help="fragment model: '' (local timsTOF) or 'koina:Prosit_2020_intensity_HCD'")
@@ -776,12 +895,15 @@ def main() -> None:
         qvalue=a.qvalue,
         search_threads=a.search_threads,
         sciex_config=a.sciex_config,
+        reference_d=a.bruker_reference,
     )
 
     if a.sciex_config:
         build = timsim_sciex_pipeline
     elif a.thermo_template:
         build = timsim_thermo_pipeline
+    elif a.bruker_reference:
+        build = timsim_bruker_v2_pipeline
     else:
         build = timsim_pipeline
     dag = DAG(a.outdir)
