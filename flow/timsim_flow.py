@@ -1514,9 +1514,28 @@ def main() -> None:
     dag = DAG(a.outdir)
     if a.quant:
         # HYE quant: ONE cross-sample pipeline (two renders → joint search → fold-change), not a per-sample
-        # loop. Requires exactly two samples resolving to the two named conditions.
+        # loop. Require exactly two samples resolving to the two DESIGN conditions, with the design's
+        # reference condition FIRST (it becomes DiaNN run 0 = A, the fold-change denominator). This guards
+        # the reversed-samples / two-replicates-of-one-condition mistakes the scorer can't detect.
         if len(a.samples) != 2:
             ap.error(f"--quant needs exactly 2 samples (the two conditions), got {a.samples}")
+        import tomllib
+        _design = tomllib.load(open(a.design_spec, "rb"))
+        _conds = [c["name"] for c in _design["condition"]]
+        _ref = _design.get("design", {}).get("reference", _conds[0])
+        if len(_conds) != 2:
+            ap.error(f"--quant needs a 2-condition design; {a.design_spec} has conditions {_conds}")
+
+        def _cond_of(sid):
+            m = [c for c in _conds if sid == c or sid.startswith(c + "_")]
+            return m[0] if len(m) == 1 else None
+        _sc = [_cond_of(s) for s in a.samples]
+        if None in _sc or set(_sc) != set(_conds):
+            ap.error(f"--quant samples {a.samples} must map 1:1 to the two design conditions {_conds} "
+                     f"(got {_sc}); name them e.g. {_conds[0]}_R1 {_conds[1]}_R1")
+        if _sc[0] != _ref:
+            ap.error(f"--quant: the FIRST sample must be the design reference condition {_ref!r} "
+                     f"(the fold-change denominator); got {a.samples[0]} → {_sc[0]!r}. Reorder --samples.")
         P = timsim_hye_quant_pipeline(cfg, a.samples)
         dag.add(P, request=[P.quant])
         print(dag)
