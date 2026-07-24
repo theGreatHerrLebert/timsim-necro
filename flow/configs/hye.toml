@@ -1,9 +1,13 @@
+# HYE (Human/Yeast/E.coli) mixed proteome for the quant fold-change benchmark.
+# Three organism-tagged sources; the design (design.toml) mixes them at two dilutions (A/B) so the
+# expected per-organism log2 fold-changes are known: HUMAN 1:1 (0), YEAST 0.30→0.20 (−0.585),
+# ECOLI 0.05→0.15 (+1.585). See HYE_QUANT.md.
 [[source]]
-path = "/scratch/timsim-demo/SUBMISSION/zenodo/plain/hye/fasta-hye/all/HUMAN.fasta"
+path = "/media/hd02/data/fasta/HYE/HUMAN.fasta"
 organism = "HUMAN"
 [[source]]
-path = "/scratch/timsim-demo/SUBMISSION/zenodo/plain/hye/fasta-hye/all/YEAST.fasta"
+path = "/media/hd02/data/fasta/HYE/YEAST.fasta"
 organism = "YEAST"
 [[source]]
-path = "/scratch/timsim-demo/SUBMISSION/zenodo/plain/hye/fasta-hye/all/ECOLI.fasta"
+path = "/media/hd02/data/fasta/HYE/ECOLI.fasta"
 organism = "ECOLI"
