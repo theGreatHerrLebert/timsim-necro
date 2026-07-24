@@ -408,6 +408,28 @@ def render_control_noise_flags(cfg) -> str:
     return render_noise_flags(cfg) + " --noise-only"
 
 
+def render_spike_flags(cfg) -> str:
+    """Spike-into-real (mode B): overlay the synthetic signal onto a REAL `.d`. Returns ` --spike-into
+    <path>` when set (mutually exclusive with A2 noise), "" otherwise."""
+    p = getattr(cfg, "spike_into", None)
+    return f" --spike-into {p}" if p else ""
+
+
+def render_extra_flags(cfg) -> str:
+    """The render command's real-data suffix: A2 noise OR spike-into (mutually exclusive — one is empty).
+    "" when neither, so the command (and necroflow fingerprint) is byte-identical to a plain render."""
+    return render_noise_flags(cfg) + render_spike_flags(cfg)
+
+
+def render_control_flags(cfg) -> str:
+    """The BACKGROUND-CONTROL render's suffix (searched → IDs subtracted from FDP): the real background
+    alone, no synthetic. Spike → `--spike-into X --noise-only` (a re-encoded copy of X); A2 →
+    `--noise-real-data ... --noise-only`. "" when neither is active."""
+    if getattr(cfg, "spike_into", None):
+        return render_spike_flags(cfg) + " --noise-only"
+    return render_control_noise_flags(cfg)
+
+
 @r.command(f"{BIN}/timsim-proteome --spec {{spec}} --out {{proteome}}")
 def proteome(spec: str):
     """FASTAs -> proteins. STRUCTURE.
@@ -1083,7 +1105,7 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
         reference_d=cfg.reference_d,
         sample_id=sample_id,
         intensity_scale=cfg.intensity_scale,
-        noise_flags=render_noise_flags(cfg),
+        noise_flags=render_extra_flags(cfg),
     )
     # ── phase 2 (opt-in): DiaNN-search the .d natively + score against the answer key ──
     if getattr(cfg, "search_fasta", None):
@@ -1096,11 +1118,11 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
             min_length=cfg.min_length,
             max_length=cfg.max_length,
         )
-        if getattr(cfg, "noise_real_data", False):
-            # A2 real-data noise: the reference blank's real peptides get identified by the search and
-            # would inflate FDP. Render a NOISE-ONLY control (same seed, background alone), search it, and
-            # subtract its IDs. The control reuses the render/search nodes — a distinct command (adds
-            # `--noise-only`) → a separate content-addressed node.
+        if getattr(cfg, "noise_real_data", False) or getattr(cfg, "spike_into", None):
+            # Real-data background (A2 sampled blank, or spike-into a real run): the real peptides get
+            # identified by the search and would inflate FDP. Render a background-only control (same seed,
+            # no synthetic), search it, and subtract its IDs. The control reuses the render/search nodes —
+            # a distinct command (adds `--noise-only`) → a separate content-addressed node.
             P.raw_control, P.truth_control = r.render(
                 P.precursors,
                 P.rt,
@@ -1110,7 +1132,7 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
                 reference_d=cfg.reference_d,
                 sample_id=sample_id,
                 intensity_scale=cfg.intensity_scale,
-                noise_flags=render_control_noise_flags(cfg),
+                noise_flags=render_control_flags(cfg),
             )
             P.diann_control = r.search_bruker(
                 P.raw_control,
@@ -1307,6 +1329,10 @@ def main() -> None:
                     help="A2: keep probability per sampled MS1 background peak (v1 0.2)")
     ap.add_argument("--noise-fragment-fraction", type=float, default=0.2,
                     help="A2: keep probability per sampled MS2 background peak (v1 0.2)")
+    ap.add_argument("--spike-into", default=None,
+                    help="Spike-into-real (mode B): overlay the synthetic signal additively onto this REAL "
+                         ".d (selects the Bruker DIA pipeline; the .d is also the reference geometry). Only "
+                         "the spikes are labeled; the real run's IDs are subtracted from FDP via a control.")
     ap.add_argument("--search-fasta", default=None,
                     help="opt into phase 2: DiaNN-search the rendered .raw against this FASTA, then score "
                          "against the answer key. Omit to stop at the .raw.")
@@ -1341,10 +1367,12 @@ def main() -> None:
         noise_intensity_max=a.noise_intensity_max,
         noise_precursor_fraction=a.noise_precursor_fraction,
         noise_fragment_fraction=a.noise_fragment_fraction,
+        spike_into=a.spike_into,
         search_fasta=a.search_fasta,
         qvalue=a.qvalue,
         search_threads=a.search_threads,
-        reference_d=a.bruker_reference or a.bruker_dda,
+        # spike-into implies the reference geometry comes from the spike target itself.
+        reference_d=a.spike_into or a.bruker_reference or a.bruker_dda,
         # Bruker DDA-PASEF selection params
         dda_precursors_every=a.dda_precursors_every,
         dda_max_precursors=a.dda_max_precursors,
@@ -1363,7 +1391,7 @@ def main() -> None:
         build = timsim_thermo_pipeline
     elif a.bruker_dda:
         build = timsim_bruker_dda_pipeline
-    elif a.bruker_reference:
+    elif a.bruker_reference or a.spike_into:
         build = timsim_bruker_v2_pipeline
     else:
         build = timsim_pipeline

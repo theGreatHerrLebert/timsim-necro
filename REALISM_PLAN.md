@@ -140,8 +140,13 @@ real run IS the noise).
    noise-only control render + its search + `--background-report` into the necroflow DAG so the searched
    FDP validation runs end-to-end; (b) then confirm measured FDP moves toward v1's 3–5% on the golden
    gate's real fixture (needs DiaNN). Optional: memory-stream the A2 cache for full-scale runs.
-3. **B (spike-into-real)** — the additive-onto-real render + the spike-recovery eval mode. Validate: the
-   real `.d`'s peaks are preserved and a known spike is recoverable in the real matrix.
+3. **B (spike-into-real) ✅ DONE + flow-wired.** `timsim-render --spike-into <real.d>` copies every real
+   frame + adds synthetic on top (v1 `superimpose_reference_frames`); reuses A2's deposit path. Control =
+   `--spike-into X --noise-only` (re-encoded copy of X), searched, IDs subtracted via `--background-report`
+   (spike-recovery == the A2 subtraction). Validated: control reproduces X EXACTLY (per-frame + total
+   70,876,746==70,876,746); spike-full = real+synthetic; off byte-identical. A critical emit_all fix (every
+   frame visited when background present) also corrected A2 under-depositing background only near signal.
+   REMAINING (empirical): recover a known spike at a believable FDP in the real matrix (needs DiaNN).
 
 Each lands behind the golden gate; seed makes every noise/spike render reproducible.
 
