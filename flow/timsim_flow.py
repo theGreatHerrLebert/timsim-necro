@@ -398,6 +398,16 @@ def render_noise_flags(cfg) -> str:
     return " " + " ".join(parts)
 
 
+def render_control_noise_flags(cfg) -> str:
+    """Noise flags for the A2 background CONTROL render: the SAME noise as the real run + `--noise-only`
+    (deposit only the real-data background, no synthetic signal), at the same seed. A search of this control
+    `.d` yields the reference blank's real IDs, which the scorer subtracts from FDP. Only meaningful when A2
+    is on (the caller gates on `cfg.noise_real_data`); returns "" otherwise."""
+    if not getattr(cfg, "noise_real_data", False):
+        return ""
+    return render_noise_flags(cfg) + " --noise-only"
+
+
 @r.command(f"{BIN}/timsim-proteome --spec {{spec}} --out {{proteome}}")
 def proteome(spec: str):
     """FASTAs -> proteins. STRUCTURE.
@@ -805,6 +815,27 @@ def score_bruker(diann: DiannReport, truth: BrukerTruthV2, peptides: Peptides, q
     return ScoreMetrics[metrics]
 
 
+@r.command(
+    "python -m timsim_eval.v2_thermo_eval "
+    "--report {diann}/report.parquet --truth {truth} --peptides {peptides} "
+    "--background-report {background}/report.parquet "
+    "--fdr {qvalue} --out {metrics}"
+)
+def score_bruker_bg(
+    diann: DiannReport,
+    background: DiannReport,
+    truth: BrukerTruthV2,
+    peptides: Peptides,
+    qvalue: float,
+):
+    """SCORE (Bruker, A2 real-data noise): like `score_bruker`, but subtracts the noise-only control's IDs
+    from FDP. With A2 the reference blank's real peptides get identified by the search — they are NOT false
+    positives against the synthetic answer key, so counting them would inflate FDP. `background` is the
+    DiaNN report of the `--noise-only` control render (same seed, background alone); the scorer removes its
+    IDs (`background − ground_truth`, never a real synthetic hit). See REALISM_PLAN.md."""
+    return ScoreMetrics[metrics]
+
+
 # ── phase 2 for the lean SCIEX mzML (DiaNN reads open mzML NATIVELY — no .NET) ──
 
 
@@ -1065,7 +1096,36 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
             min_length=cfg.min_length,
             max_length=cfg.max_length,
         )
-        P.score = r.score_bruker(P.diann, P.truth, P.peptides, qvalue=cfg.qvalue)
+        if getattr(cfg, "noise_real_data", False):
+            # A2 real-data noise: the reference blank's real peptides get identified by the search and
+            # would inflate FDP. Render a NOISE-ONLY control (same seed, background alone), search it, and
+            # subtract its IDs. The control reuses the render/search nodes — a distinct command (adds
+            # `--noise-only`) → a separate content-addressed node.
+            P.raw_control, P.truth_control = r.render(
+                P.precursors,
+                P.rt,
+                P.ion_spectra,
+                P.ccs,
+                P.peptide_quantities,
+                reference_d=cfg.reference_d,
+                sample_id=sample_id,
+                intensity_scale=cfg.intensity_scale,
+                noise_flags=render_control_noise_flags(cfg),
+            )
+            P.diann_control = r.search_bruker(
+                P.raw_control,
+                search_fasta=cfg.search_fasta,
+                qvalue=cfg.qvalue,
+                search_threads=cfg.search_threads,
+                max_missed_cleavages=cfg.max_missed_cleavages,
+                min_length=cfg.min_length,
+                max_length=cfg.max_length,
+            )
+            P.score = r.score_bruker_bg(
+                P.diann, P.diann_control, P.truth, P.peptides, qvalue=cfg.qvalue
+            )
+        else:
+            P.score = r.score_bruker(P.diann, P.truth, P.peptides, qvalue=cfg.qvalue)
     return P
 
 
