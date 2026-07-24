@@ -80,8 +80,21 @@ The realistic chemical/electronic background; the piece that (with A1) reproduce
 **A3. Synthetic chemical/baseline (optional).** Poisson-count baseline peaks, uniform m/z, exponential
 intensities (`noise.py`). Only if A1+A2 leave the background too clean, or for no-reference renders.
 
-**Eval:** unchanged. Everything is still ground truth; noise just moves the measured FDP toward v1's real
-3–5%. The *point* is that our recall/FDP become believable.
+**Eval — background subtraction is REQUIRED for A2 FDP (not optional).** A2's background comes from a real
+reference; even a "blank" carries real low-level peptides, and the search engine legitimately identifies
+some. Those IDs are **real, not false positives** against our synthetic answer key — counting them inflates
+measured FDP and would make noise look like it breaks FDR when it doesn't. So FDP under A2 must **subtract
+background IDs**:
+1. Render a **noise-only control**: `timsim-render --dia --noise-real-data --noise-only --noise-seed S`
+   (same seed as the real run) — deposits only the A2 background, no synthetic signal.
+2. Search both the real run and the control with the same engine.
+3. Score with `--background-report <control_report>`: the scorer removes the control's IDs
+   (`background − ground_truth`, so a real synthetic hit that also shows up isn't dropped) and reports the
+   subtracted count. `fdp = false_after_subtraction / kept`.
+Implemented in `timsim_eval` (`score_thermo_dia` — the flow's Bruker/Thermo/SCIEX scorer — and
+`v2_eval.score`). This is the same "only labeled signal counts" principle as spike-into-real (mode B).
+Recall is unaffected (background IDs are never in the truth). Everything is still ground truth; noise +
+subtraction just make the measured FDP believable (toward v1's 3–5%).
 
 ---
 
@@ -122,9 +135,11 @@ real run IS the noise).
    closure to gain it.
 2. **A2 (real-data noise) ✅ DONE + v1-matched + flow-wired.** Reuses v1's own mscore primitives
    (`filter_ranged`/`generate_random_sample`); off ⇒ byte-identical, on ⇒ deterministic. A1 + A2 together
-   now reproduce v1's real DIA recipe. **Remaining empirical step:** run a *searched* pipeline with
-   `--noise-real-data --noise-mz-ppm 6.5` and confirm measured FDP moves toward v1's 3–5% (best done on the
-   golden gate's real fixture; needs DiaNN). Optional: memory-streaming the A2 cache for full-scale runs.
+   now reproduce v1's real DIA recipe. **FDP background-subtraction is implemented** (scorer
+   `--background-report` + `--noise-only` control render — see "Eval" above). **Remaining:** (a) wire the
+   noise-only control render + its search + `--background-report` into the necroflow DAG so the searched
+   FDP validation runs end-to-end; (b) then confirm measured FDP moves toward v1's 3–5% on the golden
+   gate's real fixture (needs DiaNN). Optional: memory-stream the A2 cache for full-scale runs.
 3. **B (spike-into-real)** — the additive-onto-real render + the spike-recovery eval mode. Validate: the
    real `.d`'s peaks are preserved and a known spike is recoverable in the real matrix.
 
