@@ -858,6 +858,57 @@ def score_bruker_bg(
     return ScoreMetrics[metrics]
 
 
+# ── HYE quant (P0.2): a JOINT DiaNN run over both conditions' `.d`, then per-organism fold-change ──
+
+
+@r.command(
+    f"mkdir -p {{diann}} && {DIANN} "
+    "--f {data_a} --f {data_b} --fasta {search_fasta} --out {diann}/report.parquet "
+    "--fasta-search --predictor --gen-spec-lib --qvalue {qvalue} --threads {search_threads} "
+    "--met-excision --cut 'K*,R*' --missed-cleavages {max_missed_cleavages} "
+    "--min-pep-len {min_length} --max-pep-len {max_length} --var-mods 1 --unimod35",
+    threads=16,
+    ram="32Gi",
+)
+def search_bruker_joint(
+    data_a: BrukerRawDataV2,
+    data_b: BrukerRawDataV2,
+    search_fasta: str,
+    qvalue: float,
+    search_threads: int,
+    max_missed_cleavages: int,
+    min_length: int,
+    max_length: int,
+):
+    """SEARCH (Bruker, JOINT): the two HYE conditions' `.d` in ONE DiaNN run (`--f A --f B`), so DiaNN does
+    cross-run normalization + MaxLFQ as a single experiment — the quant benchmark needs joint quant, which
+    a merge of two independent searches cannot recover. `data_a` is condition A (reference, Run.Index 0),
+    `data_b` is B (Run.Index 1). See HYE_QUANT.md."""
+    return DiannReport[diann]
+
+
+@r.command(
+    "python -m timsim_eval.v2_quant_eval "
+    "--report {diann}/report.parquet --peptides {peptides} --occurrences {occurrences} "
+    "--proteome {proteome} --design {design_spec} --run-col Run.Index --run-a 0 --run-b 1 "
+    "--fdr {qvalue} --delta {delta} --out {metrics}",
+)
+def quant(
+    diann: DiannReport,
+    peptides: Peptides,
+    occurrences: Occurrences,
+    proteome: Proteome,
+    design_spec: str,
+    qvalue: float,
+    delta: float,
+):
+    """SCORE (HYE quant): per-organism log2 fold-change recovery from the joint report. Organism-unique
+    peptide-level `log2(B/A)` vs the design's expected ratios; median residual + MAD + %correct, three
+    normalization views, eligibility + detection tables. `design` (design.toml) supplies the expected
+    ratios (content-hashed so editing the mixture restages). See HYE_QUANT.md."""
+    return ScoreMetrics[metrics]
+
+
 # ── phase 2 for the lean SCIEX mzML (DiaNN reads open mzML NATIVELY — no .NET) ──
 
 
@@ -1151,6 +1202,64 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
     return P
 
 
+def timsim_hye_quant_pipeline(cfg, sample_ids) -> Pipeline:
+    """HYE quant (P0.2): render TWO conditions on the Bruker projector, search them in ONE joint DiaNN run,
+    and score per-organism fold-change recovery. The feature-space nodes are shared with every other
+    pipeline (same fingerprint); only the two renders differ by `sample_id` (each selects its condition's
+    per-sample amounts from the shared `peptide_quantities`). `sample_ids` = [condition-A run, condition-B
+    run] (e.g. ["A_R1", "B_R1"]); A is the reference. Opt-in via `--quant`. See HYE_QUANT.md."""
+    sid_a, sid_b = sample_ids
+    P = Pipeline()
+    P.proteome = r.proteome(spec=cfg.proteome_spec)
+    P.peptides, P.occurrences, P.cleavage_sites = r.digest(
+        P.proteome,
+        max_missed_cleavages=cfg.max_missed_cleavages,
+        min_length=cfg.min_length,
+        max_length=cfg.max_length,
+        max_peptides=cfg.max_peptides,
+        seed=cfg.seed,
+    )
+    P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.precursors = r.precursors(P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.ccs = r.ccs(P.precursors, P.peptides)
+    P.rt = r.rt(P.peptides)
+    P.samples, P.runs, P.sample_run_map, P.protein_quantities = r.design(
+        P.proteome, spec=cfg.design_spec
+    )
+    P.peptide_quantities = r.peptide_yield(
+        P.proteome, P.occurrences, P.cleavage_sites, P.protein_quantities, P.modifications,
+        digestion_efficiency=cfg.digestion_efficiency,
+    )
+    P.fragment_prediction_input = r.frag_input(P.precursors, P.peptides, P.modforms, P.modifications)
+    P.fragment_intensities = r.fragments(
+        P.fragment_prediction_input, collision_energy=cfg.collision_energy, frag_model=cfg.frag_model
+    )
+    P.ion_spectra = r.spectra(P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities)
+
+    def _render(sid):
+        raw, _truth = r.render(
+            P.precursors, P.rt, P.ion_spectra, P.ccs, P.peptide_quantities,
+            reference_d=cfg.reference_d, sample_id=sid, intensity_scale=cfg.intensity_scale,
+            noise_flags=render_extra_flags(cfg),
+        )
+        return raw
+
+    P.raw_a = _render(sid_a)
+    P.raw_b = _render(sid_b)
+    if not getattr(cfg, "search_fasta", None):
+        raise SystemExit("--quant requires --search-fasta (the joint DiaNN search is the quant measurement)")
+    P.diann = r.search_bruker_joint(
+        P.raw_a, P.raw_b,
+        search_fasta=cfg.search_fasta, qvalue=cfg.qvalue, search_threads=cfg.search_threads,
+        max_missed_cleavages=cfg.max_missed_cleavages, min_length=cfg.min_length, max_length=cfg.max_length,
+    )
+    P.quant = r.quant(
+        P.diann, P.peptides, P.occurrences, P.proteome,
+        design_spec=cfg.design_spec, qvalue=cfg.qvalue, delta=cfg.quant_delta,
+    )
+    return P
+
+
 def timsim_bruker_dda_pipeline(cfg, sample_id: str) -> Pipeline:
     """One sample to a Bruker DDA-PASEF `.d` — identical feature-space chain to the Bruker DIA pipeline
     (so requesting DIA and DDA collapses the structure axis to one computation), but the measurement is
@@ -1338,6 +1447,12 @@ def main() -> None:
                          "against the answer key. Omit to stop at the .raw.")
     ap.add_argument("--qvalue", type=float, default=0.01, help="DiaNN + scoring q-value / FDR threshold")
     ap.add_argument("--search-threads", type=int, default=16)
+    ap.add_argument("--quant", action="store_true",
+                    help="HYE quant (P0.2): render the two design conditions, JOINT-search them in one DiaNN "
+                         "run, and score per-organism fold-change recovery. Needs exactly 2 samples "
+                         "(--samples A_R1 B_R1), a HYE proteome (--proteome-spec hye.toml), and --search-fasta.")
+    ap.add_argument("--quant-delta", type=float, default=0.5,
+                    help="log2FC tolerance for the quant %%correct metric")
     a = ap.parse_args()
 
     cfg = SimpleNamespace(
@@ -1368,6 +1483,7 @@ def main() -> None:
         noise_precursor_fraction=a.noise_precursor_fraction,
         noise_fragment_fraction=a.noise_fragment_fraction,
         spike_into=a.spike_into,
+        quant_delta=a.quant_delta,
         search_fasta=a.search_fasta,
         qvalue=a.qvalue,
         search_threads=a.search_threads,
@@ -1396,6 +1512,29 @@ def main() -> None:
     else:
         build = timsim_pipeline
     dag = DAG(a.outdir)
+    if a.quant:
+        # HYE quant: ONE cross-sample pipeline (two renders → joint search → fold-change), not a per-sample
+        # loop. Requires exactly two samples resolving to the two named conditions.
+        if len(a.samples) != 2:
+            ap.error(f"--quant needs exactly 2 samples (the two conditions), got {a.samples}")
+        P = timsim_hye_quant_pipeline(cfg, a.samples)
+        dag.add(P, request=[P.quant])
+        print(dag)
+        dag.resolve_paths(a.outdir)
+        print(f"\n  HYE quant conditions   : {a.samples[0]} (ref) vs {a.samples[1]}")
+        print(f"  nodes actually to run  : {len(dag.nodes)}   <- structure deduplicated by fingerprint")
+        if a.graph:
+            dag.save(a.graph)
+            print(f"  -> {a.graph}")
+        if a.dry_run:
+            print("\n  resolved commands:")
+            for node in dag.nodes:
+                cmd = resolve_command(node)
+                if cmd:
+                    print(f"    {cmd}")
+            return
+        dag.execute()
+        return
     for sid in a.samples:
         P = build(cfg, sid)
         # For the Thermo branch the answer key + run manifest are first-class deliverables (co-outputs of
