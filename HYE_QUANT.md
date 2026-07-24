@@ -1,5 +1,15 @@
 # P0.2 — HYE quant + fold-change eval
 
+> **STATUS — first cut DONE (2026-07-24), 2 codex rounds.** FASTA repointed (`hye.toml` → HYE H/Y/E,
+> 30881 proteins tagged); `timsim_eval/v2_quant_eval.py` scorer (organism-unique peptide log2(B/A) from
+> `Precursor.Normalised`, 3 views, median residual + MAD + %correct, eligibility/detection tables) + 3 unit
+> tests; flow wired: `--quant` → `timsim_hye_quant_pipeline` (2 renders → `search_bruker_joint --f A --f B`
+> → `quant` node, Run.Index 0=A/1=B), with condition-order validation. Recovers H≈0/Y≈−0.585/E≈+1.585 on
+> synthetic data. **Remaining (empirical):** a real DiaNN joint run on rendered A/B to see the true
+> recovered ratios + interference spread. Deferred upgrades: MaxLFQ protein endpoint, true per-peak
+> provenance leakage, replicate aggregation.
+
+
 The second-most-cited v1 axis and a genuinely NEW eval dimension: a Human/Yeast/E.coli mixed proteome at two
 known per-organism dilutions, scored on whether the search engine **recovers the known log2 fold-changes**
 (and how much cross-species interference leaks). Unlike recall/FDP (per-sample ID), this is a **cross-sample
