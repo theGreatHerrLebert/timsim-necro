@@ -11,9 +11,13 @@
 > **ambiguous FLR is 0.00%** — DiaNN never mislocalizes to a non-phosphorylated residue; it always picks one
 > of the two genuinely-present sites, so the ambiguity is *which co-eluting isomer*, not a site error. A
 > meaningful FLR benchmark **needs per-site occupancy VARIATION** (a regulated site that dominates so a
-> single isomer is the answer) — a SIM feature (today the mods model has one occupancy per mod-type).
-> Scorer + pipeline + position-convention all proven; the remaining gap is sim-side. Commits: timsim-eval
-> 2b6ca3a, timsim-necro b654eac.
+> single isomer is the answer) — provided **config-only by per-residue occupancy** (`mods_phospho_reg.toml`,
+> S:T:Y 0.40/0.10/0.02, three competing `Phospho_{S,T,Y}` all UniMod:21; 44% of multi-isomer peptides get
+> ≥2× dominance). **With it the benchmark is COMPLETE + meaningful** (phospho-run-reg, noiseless): ISOLATED
+> 970 FLR 12→8% (τ 0→0.9), CLEAR-DOMINANT 4540 FLR 19→9%, AMBIGUOUS 9450 ~4% off-site — FLR correctly drops
+> with confidence; clear-dominant > isolated > ambiguous. Remaining empirical: FLR noiseless vs A1/A2 noise.
+> Per-POSITION regulation (S+S peptides) is a deferred Rust change. Commits: timsim-eval c2d89a2,
+> timsim-necro 336b652.
 
 Can a search engine put the phosphate on the **right residue**? A distinct eval axis: not "is the peptide
 right" (recall) or "is the ID real" (FDP), but "is the SITE right" — scored by the **false-localization rate
