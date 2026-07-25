@@ -1,5 +1,17 @@
 # P1.3 — Phospho + FLR (site-localization benchmark)
 
+> **STATUS (2026-07-25) — ran end-to-end + a definitive finding.** The full `--phospho` DAG ran via venvA
+> (imspy predictors + torch; the flow is env-agnostic given `timsim-ccs/rt/fragments` on PATH + `TIMSIM_BIN`).
+> A real phospho `.d` rendered; DiaNN localized 7824 phosphoforms (median PTM.Site.Confidence 0.62); the
+> fail-closed STY check confirmed the 0-based `mod_positions` convention. The scorer is now **abundance-aware**
+> (ISOLATED single-isomer FLR + DOMINANT-isomer classification stratified by dominance). **DEFINITIVE
+> FINDING: at uniform occupancy the positional isomers `P@S`/`P@T` are each `q(1−q)` → EXACTLY equal → no
+> isomer dominates → localization is ambiguous by construction** (real run: 0 isolated, 14960 co-eluting all
+> *ambiguous*, FLR ~60% = coin-flip). A meaningful FLR benchmark **needs per-site occupancy VARIATION** (a
+> regulated site that dominates) — a SIM feature (today the mods model has one occupancy per mod-type).
+> Scorer + pipeline + position-convention all proven; the remaining gap is sim-side. Commits: timsim-eval
+> 2b6ca3a, timsim-necro b654eac.
+
 Can a search engine put the phosphate on the **right residue**? A distinct eval axis: not "is the peptide
 right" (recall) or "is the ID real" (FDP), but "is the SITE right" — scored by the **false-localization rate
 (FLR)**. And we improve on v1: simulate both **positional isomers in ONE run** (co-eluting), instead of v1's
