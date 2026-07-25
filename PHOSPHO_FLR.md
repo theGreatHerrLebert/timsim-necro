@@ -7,8 +7,11 @@
 > (ISOLATED single-isomer FLR + DOMINANT-isomer classification stratified by dominance). **DEFINITIVE
 > FINDING: at uniform occupancy the positional isomers `P@S`/`P@T` are each `q(1−q)` → EXACTLY equal → no
 > isomer dominates → localization is ambiguous by construction** (real run: 0 isolated, 14960 co-eluting all
-> *ambiguous*, FLR ~60% = coin-flip). A meaningful FLR benchmark **needs per-site occupancy VARIATION** (a
-> regulated site that dominates) — a SIM feature (today the mods model has one occupancy per mod-type).
+> *ambiguous*). With the corrected metric (score vs the acceptable-site SET, not an arbitrary tie-break) the
+> **ambiguous FLR is 0.00%** — DiaNN never mislocalizes to a non-phosphorylated residue; it always picks one
+> of the two genuinely-present sites, so the ambiguity is *which co-eluting isomer*, not a site error. A
+> meaningful FLR benchmark **needs per-site occupancy VARIATION** (a regulated site that dominates so a
+> single isomer is the answer) — a SIM feature (today the mods model has one occupancy per mod-type).
 > Scorer + pipeline + position-convention all proven; the remaining gap is sim-side. Commits: timsim-eval
 > 2b6ca3a, timsim-necro b654eac.
 
