@@ -1,0 +1,3 @@
+[[source]]
+path = "/scratch/timsim-demo/timsim-necro/flow/tiny.fasta"
+organism = "HUMAN"
