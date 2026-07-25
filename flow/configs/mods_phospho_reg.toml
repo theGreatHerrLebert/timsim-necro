@@ -1,0 +1,39 @@
+# Phospho with per-residue-type occupancy (biological S:T:Y phosphorylation ~ 86:12:2), so a peptide with
+# sites on DIFFERENT residue types has a DOMINANT isomer (P@S >> P@T >> P@Y) — makes site localization a
+# real question, not a 50/50 coin-flip (see PHOSPHO_FLR.md). Distinct names (the tool requires unique
+# names) but all UniMod:21, so annotate() tags [UNIMOD:21] and DiaNN localizes them as one phospho.
+[[modification]]
+name = "Carbamidomethyl"
+unimod_id = 4
+targets = "C"
+occupancy = 0.98
+mass_delta = 57.021464
+composition = "C2H3NO"
+stage = "protein"
+
+[[modification]]
+name = "Phospho_S"
+unimod_id = 21
+targets = "S"
+occupancy = 0.40
+mass_delta = 79.966331
+composition = "HO3P"
+stage = "protein"
+
+[[modification]]
+name = "Phospho_T"
+unimod_id = 21
+targets = "T"
+occupancy = 0.10
+mass_delta = 79.966331
+composition = "HO3P"
+stage = "protein"
+
+[[modification]]
+name = "Phospho_Y"
+unimod_id = 21
+targets = "Y"
+occupancy = 0.02
+mass_delta = 79.966331
+composition = "HO3P"
+stage = "protein"
