@@ -1,0 +1,21 @@
+# Phospho-focused modification spec for the FLR site-localization benchmark (P1.3).
+# Carbamidomethyl fixed (alkylation); Phospho variable on STY at an enriched occupancy so peptides get
+# clean single-/few-phospho positional isomers. No Oxidation/diGly (they muddy the isomer set). See
+# PHOSPHO_FLR.md.
+[[modification]]
+name       = "Carbamidomethyl"
+unimod_id  = 4
+targets    = "C"
+occupancy  = 0.98
+mass_delta = 57.021464
+composition = "C2H3NO"
+stage      = "protein"
+
+[[modification]]
+name       = "Phospho"
+unimod_id  = 21
+targets    = "STY"
+occupancy  = 0.30
+mass_delta = 79.966331
+composition = "HO3P"
+stage      = "protein"

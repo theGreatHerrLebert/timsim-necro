@@ -30,12 +30,22 @@ get clean single-/few-phospho isomers (mods.toml's diGly+phospho combos muddy th
 Carbamidomethyl (fixed). Consider restricting the benchmark to peptides with **≥2 STY sites** (localization
 is trivial with one site).
 
-### 2. DiaNN phospho search (the one real unknown)
-Search with variable Phospho on STY + localization output. DiaNN reports the localized `Modified.Sequence`
-and a per-site confidence; **verify the exact columns on a real phospho report** (`PTM.Site.Confidence` /
-`PTM.Q.Value` / localized `Modified.Sequence` positions) — this is the only thing not yet confirmed and
-gates the scorer's parse. Likely flags: `--var-mod UniMod:21,79.966331,STY --monitor-mod UniMod:21`
-(+ `--relaxed-prot-inf`); confirm against the installed DiaNN 2.5.
+### 2. DiaNN phospho search — ✅ VERIFIED (blocker resolved)
+Flags that work on DiaNN 2.5: `--var-mod UniMod:21,79.966331,STY --monitor-mod UniMod:21 --var-mods 2`
+(the `--monitor-mod` enables localization: log says *"variable modifications will be localised: UniMod:21"*
++ peptidoform scoring). The report exposes **exactly** what the FLR scorer needs (probed on a rendered
+Bruker DIA `.d`):
+- `Modified.Sequence` — `(UniMod:21)` at the **localized residue** (e.g. `ACGARIVS(UniMod:21)RPEELR`).
+- **`PTM.Site.Confidence`** — per-PSM localization confidence ∈ [0,1] (the τ gate; observed median 0.97).
+- **`Site.Occupancy.Probabilities`** — per-candidate-site probabilities, Ascore-like:
+  `ACKQS(UniMod:21){0.999000}LGLT{0.001000}IQK` (S=0.999 vs the competing T=0.001) → the FLR-vs-probability
+  curve reads straight off this.
+- `Peptidoform.Q.Value` / `Global.Peptidoform.Q.Value` — peptidoform-level FDR (separates localized forms).
+- Site-level outputs `report.phosphosites_{90,99}.tsv` (Protein/Residue/Site/Sequence/intensity at 90/99%).
+So the scorer: true site (modform `mod_positions`) vs DiaNN's localized site (`Modified.Sequence` /
+`Site.Occupancy.Probabilities`), gated on `PTM.Site.Confidence`. **Remaining dependency:** a working predict
+stack to render a REAL phospho `.d` (venvA has the rust bins but its `pepdl` import is broken) — the probe
+above ran phospho search on a non-phospho render, which confirms the columns/format but not real FLR values.
 
 ### 3. FLR scorer — `timsim_eval/v2_flr_eval.py` (NEW)
 - **Truth:** phospho precursors → true site(s) (modform `mod_positions`), keyed on the backbone sequence.
