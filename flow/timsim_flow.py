@@ -1580,6 +1580,11 @@ def main() -> None:
     elif a.bruker_dda:
         build = timsim_bruker_dda_pipeline
     elif a.bruker_reference or a.spike_into or a.phospho:
+        if a.phospho:
+            if not (a.bruker_reference or a.spike_into):
+                ap.error("--phospho needs a reference .d (--bruker-reference <dia.d>) to render onto")
+            if not a.search_fasta:
+                ap.error("--phospho needs --search-fasta (the DiaNN --monitor-mod search is the FLR measurement)")
         build = timsim_bruker_v2_pipeline
     else:
         build = timsim_pipeline
