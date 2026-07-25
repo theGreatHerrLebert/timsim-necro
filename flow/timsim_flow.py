@@ -909,6 +909,54 @@ def quant(
     return ScoreMetrics[metrics]
 
 
+# ── phospho site-localization (P1.3): DiaNN with --monitor-mod, then FLR ──
+
+
+@r.command(
+    f"mkdir -p {{diann}} && {DIANN} "
+    "--f {data_d} --fasta {search_fasta} --out {diann}/report.parquet "
+    "--fasta-search --predictor --gen-spec-lib --qvalue {qvalue} --threads {search_threads} "
+    "--met-excision --cut 'K*,R*' --missed-cleavages {max_missed_cleavages} "
+    "--min-pep-len {min_length} --max-pep-len {max_length} "
+    "--var-mod 'UniMod:21,79.966331,STY' --monitor-mod 'UniMod:21' --var-mods 2",
+    threads=16,
+    ram="32Gi",
+)
+def search_bruker_phospho(
+    data_d: BrukerRawDataV2,
+    search_fasta: str,
+    qvalue: float,
+    search_threads: int,
+    max_missed_cleavages: int,
+    min_length: int,
+    max_length: int,
+):
+    """SEARCH (Bruker, phospho): DiaNN with variable Phospho on STY and `--monitor-mod` — which enables
+    per-site LOCALIZATION (PTM.Site.Confidence + Site.Occupancy.Probabilities in the report). See
+    PHOSPHO_FLR.md."""
+    return DiannReport[diann]
+
+
+@r.command(
+    "python -m timsim_eval.v2_flr_eval "
+    "--report {diann}/report.parquet --truth {truth} --precursors {precursors} "
+    "--modforms {modforms} --peptides {peptides} --fdr {qvalue} --target-flr {flr_target} --out {metrics}",
+)
+def score_flr(
+    diann: DiannReport,
+    truth: BrukerTruthV2,
+    precursors: Precursors,
+    modforms: Modforms,
+    peptides: Peptides,
+    qvalue: float,
+    flr_target: float,
+):
+    """SCORE (phospho FLR): empirical false-localization rate vs simulator truth. The true site comes from
+    the render's modforms (`precursor→modform→mod_positions`); DiaNN's localized site + `PTM.Site.Confidence`
+    give the FLR(τ) / recall(τ) curve over the isolated single-isomer eligible set. See PHOSPHO_FLR.md."""
+    return ScoreMetrics[metrics]
+
+
 # ── phase 2 for the lean SCIEX mzML (DiaNN reads open mzML NATIVELY — no .NET) ──
 
 
@@ -1159,7 +1207,23 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
         noise_flags=render_extra_flags(cfg),
     )
     # ── phase 2 (opt-in): DiaNN-search the .d natively + score against the answer key ──
-    if getattr(cfg, "search_fasta", None):
+    if getattr(cfg, "search_fasta", None) and getattr(cfg, "phospho", False):
+        # Phospho site-localization: DiaNN with --monitor-mod (localization), scored by FLR vs the render's
+        # true modform sites — NOT the FDP path. Use with --mods mods_phospho.toml. See PHOSPHO_FLR.md.
+        P.diann = r.search_bruker_phospho(
+            P.raw,
+            search_fasta=cfg.search_fasta,
+            qvalue=cfg.qvalue,
+            search_threads=cfg.search_threads,
+            max_missed_cleavages=cfg.max_missed_cleavages,
+            min_length=cfg.min_length,
+            max_length=cfg.max_length,
+        )
+        P.score = r.score_flr(
+            P.diann, P.truth, P.precursors, P.modforms, P.peptides,
+            qvalue=cfg.qvalue, flr_target=cfg.flr_target,
+        )
+    elif getattr(cfg, "search_fasta", None):
         P.diann = r.search_bruker(
             P.raw,
             search_fasta=cfg.search_fasta,
@@ -1453,6 +1517,12 @@ def main() -> None:
                          "(--samples A_R1 B_R1), a HYE proteome (--proteome-spec hye.toml), and --search-fasta.")
     ap.add_argument("--quant-delta", type=float, default=0.5,
                     help="log2FC tolerance for the quant %%correct metric")
+    ap.add_argument("--phospho", action="store_true",
+                    help="Phospho site-localization (P1.3): DiaNN --monitor-mod search + FLR scoring vs the "
+                         "render's true modform sites. Selects the Bruker DIA pipeline; use with "
+                         "--mods mods_phospho.toml and --search-fasta.")
+    ap.add_argument("--flr-target", type=float, default=0.01,
+                    help="target false-localization rate for the FLR operating point")
     a = ap.parse_args()
 
     cfg = SimpleNamespace(
@@ -1484,6 +1554,8 @@ def main() -> None:
         noise_fragment_fraction=a.noise_fragment_fraction,
         spike_into=a.spike_into,
         quant_delta=a.quant_delta,
+        phospho=a.phospho,
+        flr_target=a.flr_target,
         search_fasta=a.search_fasta,
         qvalue=a.qvalue,
         search_threads=a.search_threads,
@@ -1507,7 +1579,7 @@ def main() -> None:
         build = timsim_thermo_pipeline
     elif a.bruker_dda:
         build = timsim_bruker_dda_pipeline
-    elif a.bruker_reference or a.spike_into:
+    elif a.bruker_reference or a.spike_into or a.phospho:
         build = timsim_bruker_v2_pipeline
     else:
         build = timsim_pipeline
