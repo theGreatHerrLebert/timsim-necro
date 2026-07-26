@@ -74,10 +74,13 @@ def read_metrics(lvl_dir) -> dict:
 
 
 def read_density(lvl_dir) -> dict:
-    t = sorted(glob.glob(f"{lvl_dir}/render/**/truth.parquet", recursive=True))
-    if not t:
+    # A2/spike runs have TWO renders (real + --noise-only control); the control's truth is background-only
+    # (few synthetic precursors). Pick the truth with the MOST present precursors — the real render.
+    ts = glob.glob(f"{lvl_dir}/render*/**/truth.parquet", recursive=True)
+    if not ts:
         return {}
-    df = pq.read_table(t[-1]).to_pandas()
+    frames = [pq.read_table(t).to_pandas() for t in ts]
+    df = max(frames, key=lambda d: int((d["abundance"] > 0).sum()))
     present = df[df["abundance"] > 0]
     det = present[present["in_any_window"] & present["has_ms2"] & (present["abundance"] > 1e-3)]
     # co-elution proxy: mean precursors per 1-second RT bin (detectable set)
