@@ -368,66 +368,40 @@ SAGE = os.environ.get("TIMSIM_SAGE", "/home/administrator/Documents/promotion/ru
 SAGE_CONFIG = os.environ.get("TIMSIM_SAGE_CONFIG", "/scratch/timsim-demo/SAGEBench/configs/sage-smoke.json")
 
 
-def render_noise_flags(cfg) -> str:
-    """Noise CLI (`timsim-render`) rendered as a suffix on the render command. Returns "" when ALL noise is
-    off so the command — and thus the necroflow fingerprint — is byte-identical to a noiseless run (existing
-    caches stay valid). Two layers, off by default (REALISM_PLAN.md):
-      A1 signal-m/z: nonzero `--noise-mz-ppm`/`--noise-frag-ppm` (v1 3σ envelope; 6.5 == v1's real config).
-      A2 real-data background: `--noise-real-data` (sample real peaks from the reference `.d`).
-    v1's real DIA recipe runs both together."""
-    mz = getattr(cfg, "noise_mz_ppm", 0.0)
-    frag = getattr(cfg, "noise_frag_ppm", 0.0)
-    real = getattr(cfg, "noise_real_data", False)
-    if not mz and not frag and not real:
-        return ""
-    parts = []
-    if mz or frag:  # A1 signal-m/z scatter
-        parts += [f"--noise-mz-ppm {mz}", f"--noise-frag-ppm {frag}"]
-        if getattr(cfg, "noise_mz_uniform", False):
-            parts.append("--noise-mz-uniform")
-    if real:  # A2 real-data background from the reference .d
-        parts += [
-            "--noise-real-data",
-            f"--noise-precursor-frames {getattr(cfg, 'noise_precursor_frames', 5)}",
-            f"--noise-fragment-frames {getattr(cfg, 'noise_fragment_frames', 5)}",
-            f"--noise-intensity-max {getattr(cfg, 'noise_intensity_max', 150000.0)}",
-            f"--noise-precursor-fraction {getattr(cfg, 'noise_precursor_fraction', 0.2)}",
-            f"--noise-fragment-fraction {getattr(cfg, 'noise_fragment_fraction', 0.2)}",
-        ]
-    parts.append(f"--noise-seed {getattr(cfg, 'noise_seed', 0)}")
-    return " " + " ".join(parts)
+# Noise is passed to the render as INDIVIDUAL value placeholders (see the render nodes) — never as one
+# multi-token string, which necroflow would shell-quote into a single broken arg. A1 signal-m/z (ppm/seed,
+# 0 = off) is always passed; A2 / spike (presence flags) select a render VARIANT.
+def _a1_kwargs(cfg) -> dict:
+    return {
+        "noise_mz_ppm": getattr(cfg, "noise_mz_ppm", 0.0),
+        "noise_frag_ppm": getattr(cfg, "noise_frag_ppm", 0.0),
+        "noise_seed": getattr(cfg, "noise_seed", 0),
+    }
 
 
-def render_control_noise_flags(cfg) -> str:
-    """Noise flags for the A2 background CONTROL render: the SAME noise as the real run + `--noise-only`
-    (deposit only the real-data background, no synthetic signal), at the same seed. A search of this control
-    `.d` yields the reference blank's real IDs, which the scorer subtracts from FDP. Only meaningful when A2
-    is on (the caller gates on `cfg.noise_real_data`); returns "" otherwise."""
-    if not getattr(cfg, "noise_real_data", False):
-        return ""
-    return render_noise_flags(cfg) + " --noise-only"
+def _a2_kwargs(cfg) -> dict:
+    return {
+        "noise_precursor_frames": getattr(cfg, "noise_precursor_frames", 5),
+        "noise_fragment_frames": getattr(cfg, "noise_fragment_frames", 5),
+        "noise_intensity_max": getattr(cfg, "noise_intensity_max", 150000.0),
+        "noise_precursor_fraction": getattr(cfg, "noise_precursor_fraction", 0.2),
+        "noise_fragment_fraction": getattr(cfg, "noise_fragment_fraction", 0.2),
+    }
 
 
-def render_spike_flags(cfg) -> str:
-    """Spike-into-real (mode B): overlay the synthetic signal onto a REAL `.d`. Returns ` --spike-into
-    <path>` when set (mutually exclusive with A2 noise), "" otherwise."""
-    p = getattr(cfg, "spike_into", None)
-    return f" --spike-into {p}" if p else ""
-
-
-def render_extra_flags(cfg) -> str:
-    """The render command's real-data suffix: A2 noise OR spike-into (mutually exclusive — one is empty).
-    "" when neither, so the command (and necroflow fingerprint) is byte-identical to a plain render."""
-    return render_noise_flags(cfg) + render_spike_flags(cfg)
-
-
-def render_control_flags(cfg) -> str:
-    """The BACKGROUND-CONTROL render's suffix (searched → IDs subtracted from FDP): the real background
-    alone, no synthetic. Spike → `--spike-into X --noise-only` (a re-encoded copy of X); A2 →
-    `--noise-real-data ... --noise-only`. "" when neither is active."""
+def do_render(cfg, sample_id, P, control=False):
+    """Pick + call the right Bruker render node for cfg's noise/spike mode. `control=True` renders the
+    background-only variant (`--noise-only`) for the FDP-subtraction control. Returns (raw, truth)."""
+    inputs = (P.precursors, P.rt, P.ion_spectra, P.ccs, P.peptide_quantities)
+    common = dict(reference_d=cfg.reference_d, sample_id=sample_id,
+                  intensity_scale=cfg.intensity_scale, **_a1_kwargs(cfg))
     if getattr(cfg, "spike_into", None):
-        return render_spike_flags(cfg) + " --noise-only"
-    return render_control_noise_flags(cfg)
+        fn = r.render_spike_control if control else r.render_spike
+        return fn(*inputs, spike_into=cfg.spike_into, **common)
+    if getattr(cfg, "noise_real_data", False):
+        fn = r.render_a2_control if control else r.render_a2
+        return fn(*inputs, **_a2_kwargs(cfg), **common)
+    return r.render(*inputs, **common)  # noiseless / A1 (no control)
 
 
 @r.command(f"{BIN}/timsim-proteome --spec {{spec}} --out {{proteome}}")
@@ -653,33 +627,80 @@ def render_thermo(
 # engine needs. No config TOML: a reference `.d` (`--reference-d`) supplies the acquisition grid.
 
 
-@r.command(
+# The render command is assembled from single-token fragments. necroflow shell-quotes EACH `{placeholder}`
+# (shlex.quote), so a multi-token string in one placeholder would be glued into a single arg — the flag NAMES
+# must be literal in the template and only VALUES are placeholders. A1 signal-m/z is always passed (ppm 0 =
+# off = byte-identical), so noiseless and A1 share one node; A2 / spike (presence flags) get node variants.
+_RENDER_HEAD = (
     f"{BIN}/timsim-render --precursors {{precursors}} --peptide-rt {{peptide_rt}} "
     "--ion-spectra {ion_spectra} --precursor-ccs {precursor_ccs} "
     "--peptide-quantities {peptide_quantities} --sample {sample_id} "
-    "--reference-d {reference_d} --dia --intensity-scale {intensity_scale}{noise_flags} "
-    "--out {raw} --truth {truth}",
-    threads=2,
-    ram="8Gi",
+    "--reference-d {reference_d} --dia --intensity-scale {intensity_scale} "
+    "--noise-mz-ppm {noise_mz_ppm} --noise-frag-ppm {noise_frag_ppm} --noise-seed {noise_seed}"
 )
+_RENDER_A2 = (
+    " --noise-real-data --noise-precursor-frames {noise_precursor_frames} "
+    "--noise-fragment-frames {noise_fragment_frames} --noise-intensity-max {noise_intensity_max} "
+    "--noise-precursor-fraction {noise_precursor_fraction} --noise-fragment-fraction {noise_fragment_fraction}"
+)
+_RENDER_TAIL = " --out {raw} --truth {truth}"
+
+
+@r.command(_RENDER_HEAD + _RENDER_TAIL, threads=2, ram="8Gi")
 def render(
-    precursors: Precursors,
-    peptide_rt: PeptideRT,
-    ion_spectra: IonSpectra,
-    precursor_ccs: PrecursorCCS,
-    peptide_quantities: PeptideQuantities,
-    reference_d: str,
-    sample_id: str,
-    intensity_scale: float,
-    noise_flags: str = "",
+    precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
+    peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
+    noise_mz_ppm: float = 0.0, noise_frag_ppm: float = 0.0, noise_seed: int = 0,
 ):
-    """MEASUREMENT (Bruker, ion-mobility): the lean v2 projector authors a Bruker `.d` by placing the
-    instrument-independent `ion_spectra` onto the reference `.d`'s DIA grid — imspy-free, streaming,
-    memory bounded by the elution set. One node per sample (via `peptide_quantities` + `sample_id`);
-    restages when the reference `.d` changes. `--precursor-ccs` gives each ion physical 1/K0; abundance
-    from `peptide_quantities` restores the real dynamic range. DIA mode gates fragments by the reference's
-    diagonal quadrupole transmission. Co-emits the per-precursor answer key (`--truth`) so a DiaNN search
-    of the `.d` closes search→score exactly like the Thermo path."""
+    """MEASUREMENT (Bruker): the lean v2 projector places `ion_spectra` onto the reference `.d`'s DIA grid.
+    A1 signal-m/z noise is always wired (`--noise-mz-ppm/-frag-ppm`; 0 = off, byte-identical). One node per
+    sample; co-emits the per-precursor answer key (`--truth`)."""
+    return BrukerRawDataV2[raw], BrukerTruthV2[truth]
+
+
+@r.command(_RENDER_HEAD + _RENDER_A2 + _RENDER_TAIL, threads=2, ram="8Gi")
+def render_a2(
+    precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
+    peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
+    noise_mz_ppm: float, noise_frag_ppm: float, noise_seed: int,
+    noise_precursor_frames: int, noise_fragment_frames: int, noise_intensity_max: float,
+    noise_precursor_fraction: float, noise_fragment_fraction: float,
+):
+    """render + A2 real-data background sampled from the reference `.d` (the v1 DIA recipe with A1)."""
+    return BrukerRawDataV2[raw], BrukerTruthV2[truth]
+
+
+@r.command(_RENDER_HEAD + _RENDER_A2 + " --noise-only" + _RENDER_TAIL, threads=2, ram="8Gi")
+def render_a2_control(
+    precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
+    peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
+    noise_mz_ppm: float, noise_frag_ppm: float, noise_seed: int,
+    noise_precursor_frames: int, noise_fragment_frames: int, noise_intensity_max: float,
+    noise_precursor_fraction: float, noise_fragment_fraction: float,
+):
+    """A2 background-ONLY control (`--noise-only`): the real-data background alone, same seed — searched, its
+    IDs subtracted from FDP (score_bruker_bg)."""
+    return BrukerRawDataV2[raw], BrukerTruthV2[truth]
+
+
+@r.command(_RENDER_HEAD + " --spike-into {spike_into}" + _RENDER_TAIL, threads=2, ram="8Gi")
+def render_spike(
+    precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
+    peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
+    noise_mz_ppm: float, noise_frag_ppm: float, noise_seed: int, spike_into: str,
+):
+    """Spike-into-real: overlay the synthetic signal additively onto a real `.d` (`--spike-into`)."""
+    return BrukerRawDataV2[raw], BrukerTruthV2[truth]
+
+
+@r.command(_RENDER_HEAD + " --spike-into {spike_into} --noise-only" + _RENDER_TAIL, threads=2, ram="8Gi")
+def render_spike_control(
+    precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
+    peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
+    noise_mz_ppm: float, noise_frag_ppm: float, noise_seed: int, spike_into: str,
+):
+    """Spike background control (`--spike-into X --noise-only`): a re-encoded copy of X, no synthetic —
+    searched, its IDs subtracted from FDP."""
     return BrukerRawDataV2[raw], BrukerTruthV2[truth]
 
 
@@ -1195,17 +1216,7 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
     P.ion_spectra = r.spectra(
         P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities
     )
-    P.raw, P.truth = r.render(
-        P.precursors,
-        P.rt,
-        P.ion_spectra,
-        P.ccs,
-        P.peptide_quantities,
-        reference_d=cfg.reference_d,
-        sample_id=sample_id,
-        intensity_scale=cfg.intensity_scale,
-        noise_flags=render_extra_flags(cfg),
-    )
+    P.raw, P.truth = do_render(cfg, sample_id, P)
     # ── phase 2 (opt-in): DiaNN-search the .d natively + score against the answer key ──
     if getattr(cfg, "search_fasta", None) and getattr(cfg, "phospho", False):
         # Phospho site-localization: DiaNN with --monitor-mod (localization), scored by FLR vs the render's
@@ -1238,17 +1249,7 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
             # identified by the search and would inflate FDP. Render a background-only control (same seed,
             # no synthetic), search it, and subtract its IDs. The control reuses the render/search nodes —
             # a distinct command (adds `--noise-only`) → a separate content-addressed node.
-            P.raw_control, P.truth_control = r.render(
-                P.precursors,
-                P.rt,
-                P.ion_spectra,
-                P.ccs,
-                P.peptide_quantities,
-                reference_d=cfg.reference_d,
-                sample_id=sample_id,
-                intensity_scale=cfg.intensity_scale,
-                noise_flags=render_control_flags(cfg),
-            )
+            P.raw_control, P.truth_control = do_render(cfg, sample_id, P, control=True)
             P.diann_control = r.search_bruker(
                 P.raw_control,
                 search_fasta=cfg.search_fasta,
@@ -1301,11 +1302,7 @@ def timsim_hye_quant_pipeline(cfg, sample_ids) -> Pipeline:
     P.ion_spectra = r.spectra(P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities)
 
     def _render(sid):
-        raw, _truth = r.render(
-            P.precursors, P.rt, P.ion_spectra, P.ccs, P.peptide_quantities,
-            reference_d=cfg.reference_d, sample_id=sid, intensity_scale=cfg.intensity_scale,
-            noise_flags=render_extra_flags(cfg),
-        )
+        raw, _truth = do_render(cfg, sid, P)
         return raw
 
     P.raw_a = _render(sid_a)
