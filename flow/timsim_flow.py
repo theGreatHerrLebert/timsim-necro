@@ -31,7 +31,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from necroflow import DAG, NodeType, Pipeline, Rules, resolve_command
+from necroflow import DAG, NodeType, Pipeline, command, output, resolve_command
 
 
 # ── invalidation: a spec FILE is a dependency, not a string ──────────────────
@@ -356,7 +356,6 @@ class ScoreMetrics(NodeType):
 
 # ── rules ────────────────────────────────────────────────────────────────────
 
-r = Rules()
 
 BIN = os.environ.get("TIMSIM_BIN", "target/release")
 # Phase-2 search: DiaNN reads Thermo .raw natively only with the .NET 8 runtime (DOTNET_ROOT + on PATH).
@@ -396,15 +395,15 @@ def do_render(cfg, sample_id, P, control=False):
     common = dict(reference_d=cfg.reference_d, sample_id=sample_id,
                   intensity_scale=cfg.intensity_scale, **_a1_kwargs(cfg))
     if getattr(cfg, "spike_into", None):
-        fn = r.render_spike_control if control else r.render_spike
-        return fn(*inputs, spike_into=cfg.spike_into, **common)
+        fn = render_spike_control if control else render_spike
+        return fn(P, *inputs, spike_into=cfg.spike_into, **common)
     if getattr(cfg, "noise_real_data", False):
-        fn = r.render_a2_control if control else r.render_a2
-        return fn(*inputs, **_a2_kwargs(cfg), **common)
-    return r.render(*inputs, **common)  # noiseless / A1 (no control)
+        fn = render_a2_control if control else render_a2
+        return fn(P, *inputs, **_a2_kwargs(cfg), **common)
+    return render(P, *inputs, **common)  # noiseless / A1 (no control)
 
 
-@r.command(f"{BIN}/timsim-proteome --spec {{spec}} --out {{proteome}}")
+@command(f"{BIN}/timsim-proteome --spec {{spec}} --out {{proteome}}")
 def proteome(spec: str):
     """FASTAs -> proteins. STRUCTURE.
 
@@ -413,10 +412,11 @@ def proteome(spec: str):
     "HUMAN"/"YEAST"/"ECOLI" in the FASTA header, and peptides shared between two organisms silently
     become "Unknown" and get dropped.
     """
-    return Proteome[proteome]
+    proteome = output(Proteome)
+    return proteome
 
 
-@r.command(
+@command(
     f"{BIN}/timsim-digest --proteome {{proteome}} "
     "--out-peptides {peptides} --out-occurrences {occurrences} --out-cleavage-sites {cleavage_sites} "
     "--max-missed-cleavages {max_missed_cleavages} --min-length {min_length} --max-length {max_length} "
@@ -430,10 +430,13 @@ def digest(proteome: Proteome, max_missed_cleavages: int, min_length: int, max_l
     `max_peptides=0` keeps the full analytic digest; a positive value samples that many (seeded) for a
     tractable run on a large proteome while keeping the full FASTA as the search space.
     """
-    return Peptides[peptides], Occurrences[occurrences], CleavageSites[cleavage_sites]
+    peptides = output(Peptides)
+    occurrences = output(Occurrences)
+    cleavage_sites = output(CleavageSites)
+    return peptides, occurrences, cleavage_sites
 
 
-@r.command(
+@command(
     f"{BIN}/timsim-modify --peptides {{peptides}} --mods {{mods}} "
     "--out-modforms {modforms} --out-modifications {modifications} --floor {floor}"
 )
@@ -443,37 +446,42 @@ def modify(peptides: Peptides, mods: str, floor: float):
     Emits the modification spec alongside the modforms, because `yield` needs the same occupancies to
     know which cleavage sites are blocked. One artifact, two consumers, no flag to disagree about.
     """
-    return Modforms[modforms], Modifications[modifications]
+    modforms = output(Modforms)
+    modifications = output(Modifications)
+    return modforms, modifications
 
 
-@r.command(
+@command(
     f"{BIN}/timsim-precursors --peptides {{peptides}} --modforms {{modforms}} "
     "--out {precursors} --charge-model {charge_model} --seed {seed}"
 )
 def precursors(peptides: Peptides, modforms: Modforms, charge_model: str, seed: int):
     """Modforms -> ions. STRUCTURE: m/z and isotope envelopes are properties of the molecule, so
     they are shared by every sample too."""
-    return Precursors[precursors]
+    precursors = output(Precursors)
+    return precursors
 
 
-@r.command(
+@command(
     "timsim-ccs --precursors {precursors} --peptides {peptides} --out {precursor_ccs}"
 )
 def ccs(precursors: Precursors, peptides: Peptides):
     """Precursors -> CCS. STRUCTURE, and the one Python tool in the structure axis (the deep model
     is the standing exception). Runs once on the full precursor space and is shared by every sample
     and every simulated instrument."""
-    return PrecursorCCS[precursor_ccs]
+    precursor_ccs = output(PrecursorCCS)
+    return precursor_ccs
 
 
-@r.command("timsim-rt --peptides {peptides} --out {peptide_rt}")
+@command("timsim-rt --peptides {peptides} --out {peptide_rt}")
 def rt(peptides: Peptides):
     """Peptides -> RT index. STRUCTURE; deep model (Chronologer by default). Shared across every
     sample and every gradient."""
-    return PeptideRT[peptide_rt]
+    peptide_rt = output(PeptideRT)
+    return peptide_rt
 
 
-@r.command(
+@command(
     f"{BIN}/timsim-design --proteome {{proteome}} --spec {{spec}} "
     "--out-samples {samples} --out-runs {runs} --out-sample-run-map {sample_run_map} "
     "--out-protein-quantities {protein_quantities}"
@@ -481,15 +489,14 @@ def rt(peptides: Peptides):
 def design(proteome: Proteome, spec: str):
     """The mixture. QUANTITY — this is where an A/B experiment is *declared* rather than recovered
     from a filename afterwards."""
-    return (
-        Samples[samples],
-        Runs[runs],
-        SampleRunMap[sample_run_map],
-        ProteinQuantities[protein_quantities],
-    )
+    samples = output(Samples)
+    runs = output(Runs)
+    sample_run_map = output(SampleRunMap)
+    protein_quantities = output(ProteinQuantities)
+    return samples, runs, sample_run_map, protein_quantities
 
 
-@r.command(
+@command(
     f"{BIN}/timsim-yield --proteome {{proteome}} --occurrences {{occurrences}} "
     "--cleavage-sites {cleavage_sites} --protein-quantities {protein_quantities} "
     "--modifications {modifications} "
@@ -509,10 +516,11 @@ def peptide_yield(
     Takes `modifications` so a blocking mod (acetyl-K, GG-K, TMT-K) actually stops the protease —
     the missed cleavage it forces is how the experiment localises the site.
     """
-    return PeptideQuantities[peptide_quantities]
+    peptide_quantities = output(PeptideQuantities)
+    return peptide_quantities
 
 
-@r.command(
+@command(
     "mkdir -p {raw} && timsim {config} --save-path {raw} "
     "--v2-proteome {proteome} --v2-peptides {peptides} --v2-occurrences {occurrences} "
     "--v2-peptide-quantities {peptide_quantities} --v2-precursors {precursors} "
@@ -543,7 +551,8 @@ def simulate(
     This is the strangler seam. One node per sample, and the only thing that changes between them is
     `sample_id` — so this fans out N ways while everything above it is computed once.
     """
-    return RawData[raw]
+    raw = output(RawData)
+    return raw
 
 
 # ── the measurement/render branch (Thermo, no-IMS) ───────────────────────────
@@ -552,7 +561,7 @@ def simulate(
 # fan-out over (template, frag_model) with the feature space computed once.
 
 
-@r.command(
+@command(
     f"{BIN}/timsim-frag-input --precursors {{precursors}} --peptides {{peptides}} "
     "--modforms {modforms} --modifications {modifications} --out {fragment_prediction_input}"
 )
@@ -561,10 +570,11 @@ def frag_input(precursors: Precursors, peptides: Peptides, modforms: Modforms, m
     sequence, charge)`. STRUCTURE (no CE/model), so it is shared by every fragment model. Annotates each
     precursor's modform, so a MODIFIED precursor fragments as modified — this is the correctness fix over
     the old bare-sequence join, which predicted every modform identically."""
-    return FragmentPredictionInput[fragment_prediction_input]
+    fragment_prediction_input = output(FragmentPredictionInput)
+    return fragment_prediction_input
 
 
-@r.command(
+@command(
     "timsim-fragments --precursors {fragment_prediction_input} "
     "--collision-energy {collision_energy} --model {frag_model} --out {fragment_intensities}"
 )
@@ -572,10 +582,11 @@ def fragments(fragment_prediction_input: FragmentPredictionInput, collision_ener
     """Annotated input -> predicted fragment intensities. MEASUREMENT, instrument-DEPENDENT: `frag_model`
     is "" (local timsTOF) or "koina:Prosit_2020_intensity_HCD" (Orbitrap-HCD), a config value — so the
     timsTOF-vs-HCD split is exactly two nodes and N renders sharing a model predict fragments once."""
-    return FragmentIntensities[fragment_intensities]
+    fragment_intensities = output(FragmentIntensities)
+    return fragment_intensities
 
 
-@r.command(
+@command(
     f"{BIN}/timsim-spectra --precursors {{precursors}} --peptides {{peptides}} "
     "--modforms {modforms} --modifications {modifications} "
     "--fragment-intensities {fragment_intensities} --out {ion_spectra}"
@@ -588,10 +599,11 @@ def spectra(
     fragment_intensities: FragmentIntensities,
 ):
     """Precursors + fragments -> instrument-independent MS1 isotope + MS2 fragment spectra."""
-    return IonSpectra[ion_spectra]
+    ion_spectra = output(IonSpectra)
+    return ion_spectra
 
 
-@r.command(
+@command(
     f"{BIN}/timsim-render-thermo --precursors {{precursors}} "
     "--peptide-rt {peptide_rt} --ion-spectra {ion_spectra} --peptide-quantities {peptide_quantities} "
     "--sample {sample_id} --template {template} --intensity-scale {intensity_scale} "
@@ -616,7 +628,10 @@ def render_thermo(
     sample (via `peptide_quantities` + `sample_id`); restages when the template changes. Three co-outputs
     of one command: the `.raw`, its answer key, and a durable run manifest — one computation, so the
     answer key and audit trail can never drift from the data."""
-    return ThermoRawData[data_raw], ThermoTruth[truth], ThermoRunManifest[manifest]
+    data_raw = output(ThermoRawData)
+    truth = output(ThermoTruth)
+    manifest = output(ThermoRunManifest)
+    return data_raw, truth, manifest
 
 
 # ── the measurement/render branch (Bruker, WITH ion mobility — the lean v2 projector) ──
@@ -646,7 +661,7 @@ _RENDER_A2 = (
 _RENDER_TAIL = " --out {raw} --truth {truth}"
 
 
-@r.command(_RENDER_HEAD + _RENDER_TAIL, threads=2, ram="8Gi")
+@command(_RENDER_HEAD + _RENDER_TAIL, threads=2, ram="8Gi")
 def render(
     precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
     peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
@@ -655,10 +670,12 @@ def render(
     """MEASUREMENT (Bruker): the lean v2 projector places `ion_spectra` onto the reference `.d`'s DIA grid.
     A1 signal-m/z noise is always wired (`--noise-mz-ppm/-frag-ppm`; 0 = off, byte-identical). One node per
     sample; co-emits the per-precursor answer key (`--truth`)."""
-    return BrukerRawDataV2[raw], BrukerTruthV2[truth]
+    raw = output(BrukerRawDataV2)
+    truth = output(BrukerTruthV2)
+    return raw, truth
 
 
-@r.command(_RENDER_HEAD + _RENDER_A2 + _RENDER_TAIL, threads=2, ram="8Gi")
+@command(_RENDER_HEAD + _RENDER_A2 + _RENDER_TAIL, threads=2, ram="8Gi")
 def render_a2(
     precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
     peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
@@ -667,10 +684,12 @@ def render_a2(
     noise_precursor_fraction: float, noise_fragment_fraction: float,
 ):
     """render + A2 real-data background sampled from the reference `.d` (the v1 DIA recipe with A1)."""
-    return BrukerRawDataV2[raw], BrukerTruthV2[truth]
+    raw = output(BrukerRawDataV2)
+    truth = output(BrukerTruthV2)
+    return raw, truth
 
 
-@r.command(_RENDER_HEAD + _RENDER_A2 + " --noise-only" + _RENDER_TAIL, threads=2, ram="8Gi")
+@command(_RENDER_HEAD + _RENDER_A2 + " --noise-only" + _RENDER_TAIL, threads=2, ram="8Gi")
 def render_a2_control(
     precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
     peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
@@ -680,20 +699,24 @@ def render_a2_control(
 ):
     """A2 background-ONLY control (`--noise-only`): the real-data background alone, same seed — searched, its
     IDs subtracted from FDP (score_bruker_bg)."""
-    return BrukerRawDataV2[raw], BrukerTruthV2[truth]
+    raw = output(BrukerRawDataV2)
+    truth = output(BrukerTruthV2)
+    return raw, truth
 
 
-@r.command(_RENDER_HEAD + " --spike-into {spike_into}" + _RENDER_TAIL, threads=2, ram="8Gi")
+@command(_RENDER_HEAD + " --spike-into {spike_into}" + _RENDER_TAIL, threads=2, ram="8Gi")
 def render_spike(
     precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
     peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
     noise_mz_ppm: float, noise_frag_ppm: float, noise_seed: int, spike_into: str,
 ):
     """Spike-into-real: overlay the synthetic signal additively onto a real `.d` (`--spike-into`)."""
-    return BrukerRawDataV2[raw], BrukerTruthV2[truth]
+    raw = output(BrukerRawDataV2)
+    truth = output(BrukerTruthV2)
+    return raw, truth
 
 
-@r.command(_RENDER_HEAD + " --spike-into {spike_into} --noise-only" + _RENDER_TAIL, threads=2, ram="8Gi")
+@command(_RENDER_HEAD + " --spike-into {spike_into} --noise-only" + _RENDER_TAIL, threads=2, ram="8Gi")
 def render_spike_control(
     precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
     peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
@@ -701,7 +724,9 @@ def render_spike_control(
 ):
     """Spike background control (`--spike-into X --noise-only`): a re-encoded copy of X, no synthetic —
     searched, its IDs subtracted from FDP."""
-    return BrukerRawDataV2[raw], BrukerTruthV2[truth]
+    raw = output(BrukerRawDataV2)
+    truth = output(BrukerTruthV2)
+    return raw, truth
 
 
 # ── Bruker DDA-PASEF → `.d` (top-N selection + dynamic exclusion; searched by Sage, not DiaNN) ──
@@ -710,7 +735,7 @@ def render_spike_control(
 # exclusion + band-limited MS2, and co-emits a per-SELECTION-EVENT answer key.
 
 
-@r.command(
+@command(
     f"{BIN}/timsim-render --dda --precursors {{precursors}} --peptide-rt {{peptide_rt}} "
     "--ion-spectra {ion_spectra} --precursor-ccs {precursor_ccs} --peptide-quantities {peptide_quantities} "
     "--sample {sample_id} --reference-d {reference_d} --intensity-scale {intensity_scale} "
@@ -736,7 +761,9 @@ def render_dda(
     precursor selection with `exclusion_width`-frame dynamic exclusion, band-limited MS2 on the reference's
     scan geometry. Co-emits `--dda-truth` (one row per selection event) so a Sage search of the `.d` scores
     against exactly the precursors DDA fragmented. Restages when the reference `.d` changes."""
-    return BrukerDdaData[raw], DdaTruth[truth]
+    raw = output(BrukerDdaData)
+    truth = output(DdaTruth)
+    return raw, truth
 
 
 # ── SCIEX ZenoTOF SWATH → open mzML (no-IMS, LEAN v2 projector, synthesised schedule) ──
@@ -746,7 +773,7 @@ def render_dda(
 # `sciexwiff`/`sciex-io` (legally clean; native `.wiff` is a separate rustims-local satellite).
 
 
-@r.command(
+@command(
     f"{BIN}/timsim-render-sciex --precursors {{precursors}} --peptide-rt {{peptide_rt}} "
     "--ion-spectra {ion_spectra} --peptide-quantities {peptide_quantities} --sample {sample_id} "
     "--gradient-length-s {gradient_length_s} --cycle-time-s {cycle_time_s} "
@@ -776,13 +803,15 @@ def render_sciex(
     `.wiff`. One node per sample (via `peptide_quantities` + `sample_id`); the SWATH params are in the
     command so the fingerprint covers them (no template file). Co-emits the per-precursor answer key
     (`--truth`) so a DiaNN search of the mzML closes search→score like the Thermo/Bruker paths."""
-    return SciexMzmlData[mzml], SciexTruthV2[truth]
+    mzml = output(SciexMzmlData)
+    truth = output(SciexTruthV2)
+    return mzml, truth
 
 
 # ── phase 2: search + score (close simulate -> search -> score) ──────────────
 
 
-@r.command(
+@command(
     f"mkdir -p {{diann}} && DOTNET_ROOT={DOTNET} PATH={DOTNET}:$PATH {DIANN} "
     "--f {data_raw} --fasta {search_fasta} --out {diann}/report.parquet "
     "--fasta-search --predictor --gen-spec-lib --qvalue {qvalue} --threads {search_threads} "
@@ -804,10 +833,11 @@ def search(
     """SEARCH: DiaNN library-free over the rendered `.raw` (predict a spectral library from the FASTA,
     then search). Reads `.raw` natively via the .NET 8 runtime. The FASTA is a content-hashed dependency;
     a different render (`.raw` input) or a different DB is a different search."""
-    return DiannReport[diann]
+    diann = output(DiannReport)
+    return diann
 
 
-@r.command(
+@command(
     "python -m timsim_eval.v2_thermo_eval "
     "--report {diann}/report.parquet --truth {truth} --peptides {peptides} "
     "--fdr {qvalue} --out {metrics}"
@@ -816,13 +846,14 @@ def score(diann: DiannReport, truth: ThermoTruth, peptides: Peptides, qvalue: fl
     """SCORE: the DiaNN report against the render's answer key. Hierarchical recall + FDP + recall-by-
     abundance-decile, content-addressed to the exact `.raw`/truth/DB that produced it — so the number
     can never be attributed to the wrong run."""
-    return ScoreMetrics[metrics]
+    metrics = output(ScoreMetrics)
+    return metrics
 
 
 # ── phase 2 for the lean Bruker `.d` (dia-PASEF; DiaNN reads `.d` NATIVELY — no .NET) ──
 
 
-@r.command(
+@command(
     f"mkdir -p {{diann}} && {DIANN} "
     "--f {data_d} --fasta {search_fasta} --out {diann}/report.parquet "
     "--fasta-search --predictor --gen-spec-lib --qvalue {qvalue} --threads {search_threads} "
@@ -843,10 +874,11 @@ def search_bruker(
     """SEARCH (Bruker dia-PASEF): DiaNN library-free over the rendered `.d`. Unlike the Thermo `.raw`, a
     Bruker `.d` is DiaNN's NATIVE input on Linux — no .NET runtime. The FASTA is a content-hashed
     dependency; a different render or DB is a different search."""
-    return DiannReport[diann]
+    diann = output(DiannReport)
+    return diann
 
 
-@r.command(
+@command(
     "python -m timsim_eval.v2_thermo_eval "
     "--report {diann}/report.parquet --truth {truth} --peptides {peptides} "
     "--fdr {qvalue} --out {metrics}"
@@ -855,10 +887,11 @@ def score_bruker(diann: DiannReport, truth: BrukerTruthV2, peptides: Peptides, q
     """SCORE (Bruker): identical to `score`, but keyed on the Bruker answer key [`BrukerTruthV2`]. The
     `timsim_eval` scorer is instrument-agnostic — the truth schema is the same 8 columns — so the Bruker
     `.d` closes search→score exactly like the Thermo path."""
-    return ScoreMetrics[metrics]
+    metrics = output(ScoreMetrics)
+    return metrics
 
 
-@r.command(
+@command(
     "python -m timsim_eval.v2_thermo_eval "
     "--report {diann}/report.parquet --truth {truth} --peptides {peptides} "
     "--background-report {background}/report.parquet "
@@ -876,13 +909,14 @@ def score_bruker_bg(
     positives against the synthetic answer key, so counting them would inflate FDP. `background` is the
     DiaNN report of the `--noise-only` control render (same seed, background alone); the scorer removes its
     IDs (`background − ground_truth`, never a real synthetic hit). See REALISM_PLAN.md."""
-    return ScoreMetrics[metrics]
+    metrics = output(ScoreMetrics)
+    return metrics
 
 
 # ── HYE quant (P0.2): a JOINT DiaNN run over both conditions' `.d`, then per-organism fold-change ──
 
 
-@r.command(
+@command(
     f"mkdir -p {{diann}} && {DIANN} "
     "--f {data_a} --f {data_b} --fasta {search_fasta} --out {diann}/report.parquet "
     "--fasta-search --predictor --gen-spec-lib --qvalue {qvalue} --threads {search_threads} "
@@ -905,10 +939,11 @@ def search_bruker_joint(
     cross-run normalization + MaxLFQ as a single experiment — the quant benchmark needs joint quant, which
     a merge of two independent searches cannot recover. `data_a` is condition A (reference, Run.Index 0),
     `data_b` is B (Run.Index 1). See HYE_QUANT.md."""
-    return DiannReport[diann]
+    diann = output(DiannReport)
+    return diann
 
 
-@r.command(
+@command(
     "python -m timsim_eval.v2_quant_eval "
     "--report {diann}/report.parquet --peptides {peptides} --occurrences {occurrences} "
     "--proteome {proteome} --design {design_spec} --run-col Run.Index --run-a 0 --run-b 1 "
@@ -927,13 +962,14 @@ def quant(
     peptide-level `log2(B/A)` vs the design's expected ratios; median residual + MAD + %correct, three
     normalization views, eligibility + detection tables. `design` (design.toml) supplies the expected
     ratios (content-hashed so editing the mixture restages). See HYE_QUANT.md."""
-    return ScoreMetrics[metrics]
+    metrics = output(ScoreMetrics)
+    return metrics
 
 
 # ── phospho site-localization (P1.3): DiaNN with --monitor-mod, then FLR ──
 
 
-@r.command(
+@command(
     f"mkdir -p {{diann}} && {DIANN} "
     "--f {data_d} --fasta {search_fasta} --out {diann}/report.parquet "
     "--fasta-search --predictor --gen-spec-lib --qvalue {qvalue} --threads {search_threads} "
@@ -955,10 +991,11 @@ def search_bruker_phospho(
     """SEARCH (Bruker, phospho): DiaNN with variable Phospho on STY and `--monitor-mod` — which enables
     per-site LOCALIZATION (PTM.Site.Confidence + Site.Occupancy.Probabilities in the report). See
     PHOSPHO_FLR.md."""
-    return DiannReport[diann]
+    diann = output(DiannReport)
+    return diann
 
 
-@r.command(
+@command(
     "python -m timsim_eval.v2_flr_eval "
     "--report {diann}/report.parquet --truth {truth} --precursors {precursors} "
     "--modforms {modforms} --peptides {peptides} --fdr {qvalue} --target-flr {flr_target} --out {metrics}",
@@ -975,13 +1012,14 @@ def score_flr(
     """SCORE (phospho FLR): empirical false-localization rate vs simulator truth. The true site comes from
     the render's modforms (`precursor→modform→mod_positions`); DiaNN's localized site + `PTM.Site.Confidence`
     give the FLR(τ) / recall(τ) curve over the isolated single-isomer eligible set. See PHOSPHO_FLR.md."""
-    return ScoreMetrics[metrics]
+    metrics = output(ScoreMetrics)
+    return metrics
 
 
 # ── phase 2 for the lean SCIEX mzML (DiaNN reads open mzML NATIVELY — no .NET) ──
 
 
-@r.command(
+@command(
     f"mkdir -p {{diann}} && {DIANN} "
     "--f {mzml} --fasta {search_fasta} --out {diann}/report.parquet "
     "--fasta-search --predictor --gen-spec-lib --qvalue {qvalue} --threads {search_threads} "
@@ -1001,10 +1039,11 @@ def search_sciex(
 ):
     """SEARCH (SCIEX SWATH): DiaNN library-free over the rendered open **mzML** — DiaNN's native open
     input, no .NET, no vendor SDK. The FASTA is a content-hashed dependency."""
-    return DiannReport[diann]
+    diann = output(DiannReport)
+    return diann
 
 
-@r.command(
+@command(
     "python -m timsim_eval.v2_thermo_eval "
     "--report {diann}/report.parquet --truth {truth} --peptides {peptides} "
     "--fdr {qvalue} --out {metrics}"
@@ -1012,13 +1051,14 @@ def search_sciex(
 def score_sciex(diann: DiannReport, truth: SciexTruthV2, peptides: Peptides, qvalue: float):
     """SCORE (SCIEX): the same instrument-agnostic `timsim_eval` scorer, keyed on the SWATH answer key
     [`SciexTruthV2`] — the SCIEX mzML closes search→score exactly like Thermo/Bruker."""
-    return ScoreMetrics[metrics]
+    metrics = output(ScoreMetrics)
+    return metrics
 
 
 # ── phase 2 for Bruker DDA-PASEF (Sage database search of the `.d`; NOT DiaNN, which is DIA-only) ──
 
 
-@r.command(
+@command(
     f"mkdir -p {{sage}} && {SAGE} -f {{search_fasta}} -o {{sage}} {SAGE_CONFIG} {{data_d}}",
     threads=16,
     ram="32Gi",
@@ -1027,10 +1067,11 @@ def search_dda(data_d: BrukerDdaData, search_fasta: str):
     """SEARCH (Bruker DDA): Sage database search over the rendered `.d` (native `.d` reader). The Sage
     config (enzyme/mods/tolerances) is `TIMSIM_SAGE_CONFIG`; the FASTA is overridden per run with `-f`, so
     the same content-hashed dependency logic applies (a different render or DB is a different search)."""
-    return SageReport[sage]
+    sage = output(SageReport)
+    return sage
 
 
-@r.command(
+@command(
     "python -m timsim_eval.v2_dda_eval "
     "--sage {sage}/results.sage.tsv --truth {truth} --peptides {peptides} --fdr {qvalue} --out {metrics}"
 )
@@ -1038,13 +1079,14 @@ def score_dda(sage: SageReport, truth: DdaTruth, peptides: Peptides, qvalue: flo
     """SCORE (Bruker DDA): map Sage's PSMs (`scannr` → `tdf_precursor_id`) onto the selection-event answer
     key. DDA recall is CONDITIONAL — over the precursors DDA actually fragmented (top-N), not all
     precursors — because DDA only selects a subset per cycle."""
-    return ScoreMetrics[metrics]
+    metrics = output(ScoreMetrics)
+    return metrics
 
 
 # ── the pipeline ─────────────────────────────────────────────────────────────
 
 
-def timsim_pipeline(cfg, sample_id: str) -> Pipeline:
+def timsim_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     """One sample, end to end.
 
     Every node above `peptide_yield` depends only on things that do NOT vary with the sample, so N
@@ -1052,10 +1094,9 @@ def timsim_pipeline(cfg, sample_id: str) -> Pipeline:
     necroflow collapses them. The cache model is not implemented here; it is *implied* by declaring
     the dependencies honestly.
     """
-    P = Pipeline()
-    P.proteome = r.proteome(spec=cfg.proteome_spec)
+    P.proteome = proteome(P, spec=cfg.proteome_spec)
 
-    P.peptides, P.occurrences, P.cleavage_sites = r.digest(
+    P.peptides, P.occurrences, P.cleavage_sites = digest(P, 
         P.proteome,
         max_missed_cleavages=cfg.max_missed_cleavages,
         min_length=cfg.min_length,
@@ -1064,21 +1105,21 @@ def timsim_pipeline(cfg, sample_id: str) -> Pipeline:
         seed=cfg.seed,
     )
 
-    P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.modforms, P.modifications = modify(P, P.peptides, mods=cfg.mods, floor=cfg.floor)
 
-    P.precursors = r.precursors(
+    P.precursors = precursors(P, 
         P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed
     )
-    P.ccs = r.ccs(P.precursors, P.peptides)
-    P.rt = r.rt(P.peptides)
+    P.ccs = ccs(P, P.precursors, P.peptides)
+    P.rt = rt(P, P.peptides)
 
     # The seed lives INSIDE the design spec, not on the command line — it is a property of the
     # experiment, and a flag would let the artifact and the caller disagree about it.
-    P.samples, P.runs, P.sample_run_map, P.protein_quantities = r.design(
+    P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, spec=cfg.design_spec
     )
 
-    P.peptide_quantities = r.peptide_yield(
+    P.peptide_quantities = peptide_yield(P, 
         P.proteome,
         P.occurrences,
         P.cleavage_sites,
@@ -1089,7 +1130,7 @@ def timsim_pipeline(cfg, sample_id: str) -> Pipeline:
 
     # The fan-out. `sample_id` is the ONLY thing that differs between samples, so this node's
     # fingerprint differs and everything upstream of it does not.
-    P.raw = r.simulate(
+    P.raw = simulate(P, 
         P.proteome,
         P.peptides,
         P.occurrences,
@@ -1101,10 +1142,9 @@ def timsim_pipeline(cfg, sample_id: str) -> Pipeline:
         sample_id=sample_id,
         seed=cfg.seed,
     )
-    return P
 
 
-def timsim_thermo_pipeline(cfg, sample_id: str) -> Pipeline:
+def timsim_thermo_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     """One sample, end to end, but the MEASUREMENT is a Thermo `.raw` authored into a template (no-IMS
     Orbitrap / Astral) via explicit `fragments -> spectra -> render_thermo` nodes.
 
@@ -1113,9 +1153,8 @@ def timsim_thermo_pipeline(cfg, sample_id: str) -> Pipeline:
     structure axis is computed once. CCS is omitted (no ion mobility). The instrument/method matrix is a
     fan-out over `cfg.template` × `cfg.frag_model`.
     """
-    P = Pipeline()
-    P.proteome = r.proteome(spec=cfg.proteome_spec)
-    P.peptides, P.occurrences, P.cleavage_sites = r.digest(
+    P.proteome = proteome(P, spec=cfg.proteome_spec)
+    P.peptides, P.occurrences, P.cleavage_sites = digest(P, 
         P.proteome,
         max_missed_cleavages=cfg.max_missed_cleavages,
         min_length=cfg.min_length,
@@ -1123,13 +1162,13 @@ def timsim_thermo_pipeline(cfg, sample_id: str) -> Pipeline:
         max_peptides=cfg.max_peptides,
         seed=cfg.seed,
     )
-    P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
-    P.precursors = r.precursors(P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
-    P.rt = r.rt(P.peptides)
-    P.samples, P.runs, P.sample_run_map, P.protein_quantities = r.design(
+    P.modforms, P.modifications = modify(P, P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.rt = rt(P, P.peptides)
+    P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, spec=cfg.design_spec
     )
-    P.peptide_quantities = r.peptide_yield(
+    P.peptide_quantities = peptide_yield(P, 
         P.proteome,
         P.occurrences,
         P.cleavage_sites,
@@ -1138,16 +1177,16 @@ def timsim_thermo_pipeline(cfg, sample_id: str) -> Pipeline:
         digestion_efficiency=cfg.digestion_efficiency,
     )
     # ── measurement branch (was hand-fired) ──
-    P.fragment_prediction_input = r.frag_input(
+    P.fragment_prediction_input = frag_input(P, 
         P.precursors, P.peptides, P.modforms, P.modifications
     )
-    P.fragment_intensities = r.fragments(
+    P.fragment_intensities = fragments(P, 
         P.fragment_prediction_input, collision_energy=cfg.collision_energy, frag_model=cfg.frag_model
     )
-    P.ion_spectra = r.spectra(
+    P.ion_spectra = spectra(P, 
         P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities
     )
-    P.raw, P.truth, P.manifest = r.render_thermo(
+    P.raw, P.truth, P.manifest = render_thermo(P, 
         P.precursors,
         P.rt,
         P.ion_spectra,
@@ -1161,7 +1200,7 @@ def timsim_thermo_pipeline(cfg, sample_id: str) -> Pipeline:
     )
     # ── phase 2 (opt-in): search the .raw + score against the answer key ──
     if getattr(cfg, "search_fasta", None):
-        P.diann = r.search(
+        P.diann = search(P, 
             P.raw,
             search_fasta=cfg.search_fasta,
             qvalue=cfg.qvalue,
@@ -1170,20 +1209,18 @@ def timsim_thermo_pipeline(cfg, sample_id: str) -> Pipeline:
             min_length=cfg.min_length,
             max_length=cfg.max_length,
         )
-        P.score = r.score(P.diann, P.truth, P.peptides, qvalue=cfg.qvalue)
-    return P
+        P.score = score(P, P.diann, P.truth, P.peptides, qvalue=cfg.qvalue)
 
 
-def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
+def timsim_bruker_v2_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     """One sample to a Bruker `.d`, but via the LEAN v2 projector (`timsim-render`) instead of the
     monolithic v1 `simulate` seam — imspy-free, same `frag_input -> fragments -> spectra` chain as the
     Thermo path plus CCS (Bruker has ion mobility). The feature-space nodes are IDENTICAL to the other
     pipelines (same config -> same fingerprint), so requesting a Bruker-v2, a Thermo and a SCIEX run
     collapses the whole structure axis to one computation. Opt-in via `--bruker-reference <ref.d>`; the
     v1 `timsim_pipeline` stays the default (it owns DDA + the DIA truth output v2 does not yet emit)."""
-    P = Pipeline()
-    P.proteome = r.proteome(spec=cfg.proteome_spec)
-    P.peptides, P.occurrences, P.cleavage_sites = r.digest(
+    P.proteome = proteome(P, spec=cfg.proteome_spec)
+    P.peptides, P.occurrences, P.cleavage_sites = digest(P, 
         P.proteome,
         max_missed_cleavages=cfg.max_missed_cleavages,
         min_length=cfg.min_length,
@@ -1191,14 +1228,14 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
         max_peptides=cfg.max_peptides,
         seed=cfg.seed,
     )
-    P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
-    P.precursors = r.precursors(P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
-    P.ccs = r.ccs(P.precursors, P.peptides)
-    P.rt = r.rt(P.peptides)
-    P.samples, P.runs, P.sample_run_map, P.protein_quantities = r.design(
+    P.modforms, P.modifications = modify(P, P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.ccs = ccs(P, P.precursors, P.peptides)
+    P.rt = rt(P, P.peptides)
+    P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, spec=cfg.design_spec
     )
-    P.peptide_quantities = r.peptide_yield(
+    P.peptide_quantities = peptide_yield(P, 
         P.proteome,
         P.occurrences,
         P.cleavage_sites,
@@ -1207,13 +1244,13 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
         digestion_efficiency=cfg.digestion_efficiency,
     )
     # ── measurement branch: same feature-space nodes as Thermo, then the v2 Bruker projector ──
-    P.fragment_prediction_input = r.frag_input(
+    P.fragment_prediction_input = frag_input(P, 
         P.precursors, P.peptides, P.modforms, P.modifications
     )
-    P.fragment_intensities = r.fragments(
+    P.fragment_intensities = fragments(P, 
         P.fragment_prediction_input, collision_energy=cfg.collision_energy, frag_model=cfg.frag_model
     )
-    P.ion_spectra = r.spectra(
+    P.ion_spectra = spectra(P, 
         P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities
     )
     P.raw, P.truth = do_render(cfg, sample_id, P)
@@ -1221,7 +1258,7 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
     if getattr(cfg, "search_fasta", None) and getattr(cfg, "phospho", False):
         # Phospho site-localization: DiaNN with --monitor-mod (localization), scored by FLR vs the render's
         # true modform sites — NOT the FDP path. Use with --mods mods_phospho.toml. See PHOSPHO_FLR.md.
-        P.diann = r.search_bruker_phospho(
+        P.diann = search_bruker_phospho(P, 
             P.raw,
             search_fasta=cfg.search_fasta,
             qvalue=cfg.qvalue,
@@ -1230,12 +1267,12 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
             min_length=cfg.min_length,
             max_length=cfg.max_length,
         )
-        P.score = r.score_flr(
+        P.score = score_flr(P, 
             P.diann, P.truth, P.precursors, P.modforms, P.peptides,
             qvalue=cfg.qvalue, flr_target=cfg.flr_target,
         )
     elif getattr(cfg, "search_fasta", None):
-        P.diann = r.search_bruker(
+        P.diann = search_bruker(P, 
             P.raw,
             search_fasta=cfg.search_fasta,
             qvalue=cfg.qvalue,
@@ -1250,7 +1287,7 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
             # no synthetic), search it, and subtract its IDs. The control reuses the render/search nodes —
             # a distinct command (adds `--noise-only`) → a separate content-addressed node.
             P.raw_control, P.truth_control = do_render(cfg, sample_id, P, control=True)
-            P.diann_control = r.search_bruker(
+            P.diann_control = search_bruker(P, 
                 P.raw_control,
                 search_fasta=cfg.search_fasta,
                 qvalue=cfg.qvalue,
@@ -1259,24 +1296,22 @@ def timsim_bruker_v2_pipeline(cfg, sample_id: str) -> Pipeline:
                 min_length=cfg.min_length,
                 max_length=cfg.max_length,
             )
-            P.score = r.score_bruker_bg(
+            P.score = score_bruker_bg(P, 
                 P.diann, P.diann_control, P.truth, P.peptides, qvalue=cfg.qvalue
             )
         else:
-            P.score = r.score_bruker(P.diann, P.truth, P.peptides, qvalue=cfg.qvalue)
-    return P
+            P.score = score_bruker(P, P.diann, P.truth, P.peptides, qvalue=cfg.qvalue)
 
 
-def timsim_hye_quant_pipeline(cfg, sample_ids) -> Pipeline:
+def timsim_hye_quant_pipeline(P: Pipeline, cfg, sample_ids) -> None:
     """HYE quant (P0.2): render TWO conditions on the Bruker projector, search them in ONE joint DiaNN run,
     and score per-organism fold-change recovery. The feature-space nodes are shared with every other
     pipeline (same fingerprint); only the two renders differ by `sample_id` (each selects its condition's
     per-sample amounts from the shared `peptide_quantities`). `sample_ids` = [condition-A run, condition-B
     run] (e.g. ["A_R1", "B_R1"]); A is the reference. Opt-in via `--quant`. See HYE_QUANT.md."""
     sid_a, sid_b = sample_ids
-    P = Pipeline()
-    P.proteome = r.proteome(spec=cfg.proteome_spec)
-    P.peptides, P.occurrences, P.cleavage_sites = r.digest(
+    P.proteome = proteome(P, spec=cfg.proteome_spec)
+    P.peptides, P.occurrences, P.cleavage_sites = digest(P, 
         P.proteome,
         max_missed_cleavages=cfg.max_missed_cleavages,
         min_length=cfg.min_length,
@@ -1284,22 +1319,22 @@ def timsim_hye_quant_pipeline(cfg, sample_ids) -> Pipeline:
         max_peptides=cfg.max_peptides,
         seed=cfg.seed,
     )
-    P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
-    P.precursors = r.precursors(P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
-    P.ccs = r.ccs(P.precursors, P.peptides)
-    P.rt = r.rt(P.peptides)
-    P.samples, P.runs, P.sample_run_map, P.protein_quantities = r.design(
+    P.modforms, P.modifications = modify(P, P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.ccs = ccs(P, P.precursors, P.peptides)
+    P.rt = rt(P, P.peptides)
+    P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, spec=cfg.design_spec
     )
-    P.peptide_quantities = r.peptide_yield(
+    P.peptide_quantities = peptide_yield(P, 
         P.proteome, P.occurrences, P.cleavage_sites, P.protein_quantities, P.modifications,
         digestion_efficiency=cfg.digestion_efficiency,
     )
-    P.fragment_prediction_input = r.frag_input(P.precursors, P.peptides, P.modforms, P.modifications)
-    P.fragment_intensities = r.fragments(
+    P.fragment_prediction_input = frag_input(P, P.precursors, P.peptides, P.modforms, P.modifications)
+    P.fragment_intensities = fragments(P, 
         P.fragment_prediction_input, collision_energy=cfg.collision_energy, frag_model=cfg.frag_model
     )
-    P.ion_spectra = r.spectra(P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities)
+    P.ion_spectra = spectra(P, P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities)
 
     def _render(sid):
         raw, _truth = do_render(cfg, sid, P)
@@ -1309,26 +1344,24 @@ def timsim_hye_quant_pipeline(cfg, sample_ids) -> Pipeline:
     P.raw_b = _render(sid_b)
     if not getattr(cfg, "search_fasta", None):
         raise SystemExit("--quant requires --search-fasta (the joint DiaNN search is the quant measurement)")
-    P.diann = r.search_bruker_joint(
+    P.diann = search_bruker_joint(P, 
         P.raw_a, P.raw_b,
         search_fasta=cfg.search_fasta, qvalue=cfg.qvalue, search_threads=cfg.search_threads,
         max_missed_cleavages=cfg.max_missed_cleavages, min_length=cfg.min_length, max_length=cfg.max_length,
     )
-    P.quant = r.quant(
+    P.quant = quant(P, 
         P.diann, P.peptides, P.occurrences, P.proteome,
         design_spec=cfg.design_spec, qvalue=cfg.qvalue, delta=cfg.quant_delta,
     )
-    return P
 
 
-def timsim_bruker_dda_pipeline(cfg, sample_id: str) -> Pipeline:
+def timsim_bruker_dda_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     """One sample to a Bruker DDA-PASEF `.d` — identical feature-space chain to the Bruker DIA pipeline
     (so requesting DIA and DDA collapses the structure axis to one computation), but the measurement is
     `timsim-render --dda` (top-N selection) and phase-2 is Sage → `v2_dda_eval` (DiaNN is DIA-only).
     Opt-in via `--bruker-dda <ref.d>`."""
-    P = Pipeline()
-    P.proteome = r.proteome(spec=cfg.proteome_spec)
-    P.peptides, P.occurrences, P.cleavage_sites = r.digest(
+    P.proteome = proteome(P, spec=cfg.proteome_spec)
+    P.peptides, P.occurrences, P.cleavage_sites = digest(P, 
         P.proteome,
         max_missed_cleavages=cfg.max_missed_cleavages,
         min_length=cfg.min_length,
@@ -1336,14 +1369,14 @@ def timsim_bruker_dda_pipeline(cfg, sample_id: str) -> Pipeline:
         max_peptides=cfg.max_peptides,
         seed=cfg.seed,
     )
-    P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
-    P.precursors = r.precursors(P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
-    P.ccs = r.ccs(P.precursors, P.peptides)
-    P.rt = r.rt(P.peptides)
-    P.samples, P.runs, P.sample_run_map, P.protein_quantities = r.design(
+    P.modforms, P.modifications = modify(P, P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.ccs = ccs(P, P.precursors, P.peptides)
+    P.rt = rt(P, P.peptides)
+    P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, spec=cfg.design_spec
     )
-    P.peptide_quantities = r.peptide_yield(
+    P.peptide_quantities = peptide_yield(P, 
         P.proteome,
         P.occurrences,
         P.cleavage_sites,
@@ -1352,16 +1385,16 @@ def timsim_bruker_dda_pipeline(cfg, sample_id: str) -> Pipeline:
         digestion_efficiency=cfg.digestion_efficiency,
     )
     # ── measurement branch: same feature-space nodes as Bruker DIA, then the DDA-PASEF projector ──
-    P.fragment_prediction_input = r.frag_input(
+    P.fragment_prediction_input = frag_input(P, 
         P.precursors, P.peptides, P.modforms, P.modifications
     )
-    P.fragment_intensities = r.fragments(
+    P.fragment_intensities = fragments(P, 
         P.fragment_prediction_input, collision_energy=cfg.collision_energy, frag_model=cfg.frag_model
     )
-    P.ion_spectra = r.spectra(
+    P.ion_spectra = spectra(P, 
         P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities
     )
-    P.raw, P.truth = r.render_dda(
+    P.raw, P.truth = render_dda(P, 
         P.precursors,
         P.rt,
         P.ion_spectra,
@@ -1376,19 +1409,17 @@ def timsim_bruker_dda_pipeline(cfg, sample_id: str) -> Pipeline:
     )
     # ── phase 2 (opt-in): Sage-search the .d + score against the selection-event answer key ──
     if getattr(cfg, "search_fasta", None):
-        P.sage = r.search_dda(P.raw, search_fasta=cfg.search_fasta)
-        P.score = r.score_dda(P.sage, P.truth, P.peptides, qvalue=cfg.qvalue)
-    return P
+        P.sage = search_dda(P, P.raw, search_fasta=cfg.search_fasta)
+        P.score = score_dda(P, P.sage, P.truth, P.peptides, qvalue=cfg.qvalue)
 
 
-def timsim_sciex_pipeline(cfg, sample_id: str) -> Pipeline:
+def timsim_sciex_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     """One sample to a SCIEX ZenoTOF SWATH **mzML** via the LEAN v2 projector (`timsim-render-sciex`) —
     imspy-free, no `.wiff`. Reuses the SAME `frag_input → fragments → spectra` feature-space chain as the
     Thermo/Bruker pipelines (so requesting all three collapses the structure to one computation), then
     projects onto a synthesised SWATH schedule. No CCS (SCIEX has no ion mobility)."""
-    P = Pipeline()
-    P.proteome = r.proteome(spec=cfg.proteome_spec)
-    P.peptides, P.occurrences, P.cleavage_sites = r.digest(
+    P.proteome = proteome(P, spec=cfg.proteome_spec)
+    P.peptides, P.occurrences, P.cleavage_sites = digest(P, 
         P.proteome,
         max_missed_cleavages=cfg.max_missed_cleavages,
         min_length=cfg.min_length,
@@ -1396,27 +1427,27 @@ def timsim_sciex_pipeline(cfg, sample_id: str) -> Pipeline:
         max_peptides=cfg.max_peptides,
         seed=cfg.seed,
     )
-    P.modforms, P.modifications = r.modify(P.peptides, mods=cfg.mods, floor=cfg.floor)
-    P.precursors = r.precursors(P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
-    P.rt = r.rt(P.peptides)
-    P.samples, P.runs, P.sample_run_map, P.protein_quantities = r.design(
+    P.modforms, P.modifications = modify(P, P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.rt = rt(P, P.peptides)
+    P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, spec=cfg.design_spec
     )
-    P.peptide_quantities = r.peptide_yield(
+    P.peptide_quantities = peptide_yield(P, 
         P.proteome, P.occurrences, P.cleavage_sites, P.protein_quantities, P.modifications,
         digestion_efficiency=cfg.digestion_efficiency,
     )
     # ── measurement branch: same feature-space nodes as Thermo/Bruker, then the SWATH mzML projector ──
-    P.fragment_prediction_input = r.frag_input(
+    P.fragment_prediction_input = frag_input(P, 
         P.precursors, P.peptides, P.modforms, P.modifications
     )
-    P.fragment_intensities = r.fragments(
+    P.fragment_intensities = fragments(P, 
         P.fragment_prediction_input, collision_energy=cfg.collision_energy, frag_model=cfg.frag_model
     )
-    P.ion_spectra = r.spectra(
+    P.ion_spectra = spectra(P, 
         P.precursors, P.peptides, P.modforms, P.modifications, P.fragment_intensities
     )
-    P.mzml, P.truth = r.render_sciex(
+    P.mzml, P.truth = render_sciex(P, 
         P.precursors,
         P.rt,
         P.ion_spectra,
@@ -1433,7 +1464,7 @@ def timsim_sciex_pipeline(cfg, sample_id: str) -> Pipeline:
     )
     # ── phase 2 (opt-in): DiaNN-search the mzML natively + score against the answer key ──
     if getattr(cfg, "search_fasta", None):
-        P.diann = r.search_sciex(
+        P.diann = search_sciex(P, 
             P.mzml,
             search_fasta=cfg.search_fasta,
             qvalue=cfg.qvalue,
@@ -1442,8 +1473,7 @@ def timsim_sciex_pipeline(cfg, sample_id: str) -> Pipeline:
             min_length=cfg.min_length,
             max_length=cfg.max_length,
         )
-        P.score = r.score_sciex(P.diann, P.truth, P.peptides, qvalue=cfg.qvalue)
-    return P
+        P.score = score_sciex(P, P.diann, P.truth, P.peptides, qvalue=cfg.qvalue)
 
 
 def main() -> None:
@@ -1610,10 +1640,9 @@ def main() -> None:
         if _sc[0] != _ref:
             ap.error(f"--quant: the FIRST sample must be the design reference condition {_ref!r} "
                      f"(the fold-change denominator); got {a.samples[0]} → {_sc[0]!r}. Reorder --samples.")
-        P = timsim_hye_quant_pipeline(cfg, a.samples)
-        dag.add(P, request=[P.quant])
-        print(dag)
-        dag.resolve_paths(a.outdir)
+        P = Pipeline(dag)
+        timsim_hye_quant_pipeline(P, cfg, a.samples)
+        dag.require([P.quant])
         print(f"\n  HYE quant conditions   : {a.samples[0]} (ref) vs {a.samples[1]}")
         print(f"  nodes actually to run  : {len(dag.nodes)}   <- structure deduplicated by fingerprint")
         if a.graph:
@@ -1628,8 +1657,10 @@ def main() -> None:
             return
         dag.execute()
         return
+    n_across = 0
     for sid in a.samples:
-        P = build(cfg, sid)
+        P = Pipeline(dag)
+        build(P, cfg, sid)
         # For the Thermo branch the answer key + run manifest are first-class deliverables (co-outputs of
         # the render), so request them explicitly alongside the .raw.
         req = [P.mzml] if getattr(P, "mzml", None) is not None else [P.raw]
@@ -1641,19 +1672,17 @@ def main() -> None:
         # Phase 2 (opt-in): the score is the terminal deliverable — requesting it pulls search + the .raw.
         if getattr(P, "score", None) is not None:
             req.append(P.score)
-        dag.add(P, request=req)
+        dag.require(req)
+        n_across += len(P.nodes)
 
-    print(dag)
-    dag.resolve_paths(a.outdir)
-
-    # The claim this whole exercise rests on, stated as a number rather than an argument.
-    n_total = len(dag._all_nodes)
+    # The claim this whole exercise rests on, stated as a number rather than an argument. Nodes are interned
+    # on the shared DAG, so `len(dag.nodes)` is the deduplicated count across every sample's pipeline.
     n_unique = len(dag.nodes)
     print()
     print(f"  samples requested      : {len(a.samples)}")
-    print(f"  nodes across pipelines : {n_total}")
+    print(f"  nodes across pipelines : {n_across}")
     print(f"  nodes actually to run  : {n_unique}   <- structure deduplicated by fingerprint")
-    print(f"  saved                  : {n_total - n_unique} redundant stage executions")
+    print(f"  saved                  : {n_across - n_unique} redundant stage executions")
 
     if a.graph:
         dag.save(a.graph)
