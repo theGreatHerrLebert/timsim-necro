@@ -1476,7 +1476,9 @@ def timsim_sciex_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         P.score = score_sciex(P, P.diann, P.truth, P.peptides, qvalue=cfg.qvalue)
 
 
-def main() -> None:
+def _parser() -> argparse.ArgumentParser:
+    """The full CLI surface. Shared by `main()` and the job-TOML entry point `job()`, so a TOML-driven
+    run (and any GUI on top of it) gets exactly the same knobs and defaults as the command line."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--outdir", default="/tmp/necro-timsim")
     ap.add_argument("--proteome-spec", default="hye.toml", help="multi-FASTA proteome spec")
@@ -1550,9 +1552,12 @@ def main() -> None:
                          "--mods mods_phospho.toml and --search-fasta.")
     ap.add_argument("--flr-target", type=float, default=0.01,
                     help="target false-localization rate for the FLR operating point")
-    a = ap.parse_args()
+    return ap
 
-    cfg = SimpleNamespace(
+
+def build_cfg(a) -> SimpleNamespace:
+    """Parsed args -> the config object every pipeline factory consumes."""
+    return SimpleNamespace(
         proteome_spec=a.proteome_spec,
         max_missed_cleavages=2,
         min_length=7,
@@ -1600,21 +1605,59 @@ def main() -> None:
         window_width=a.sciex_window_width,
     )
 
+
+def select_build(a, ap: argparse.ArgumentParser | None = None):
+    """Pick the pipeline factory implied by the flags (and validate coupled ones)."""
+    def fail(msg):
+        ap.error(msg) if ap else (_ for _ in ()).throw(SystemExit(f"error: {msg}"))
     if a.sciex:
-        build = timsim_sciex_pipeline
-    elif a.thermo_template:
-        build = timsim_thermo_pipeline
-    elif a.bruker_dda:
-        build = timsim_bruker_dda_pipeline
-    elif a.bruker_reference or a.spike_into or a.phospho:
+        return timsim_sciex_pipeline
+    if a.thermo_template:
+        return timsim_thermo_pipeline
+    if a.bruker_dda:
+        return timsim_bruker_dda_pipeline
+    if a.bruker_reference or a.spike_into or a.phospho:
         if a.phospho:
             if not (a.bruker_reference or a.spike_into):
-                ap.error("--phospho needs a reference .d (--bruker-reference <dia.d>) to render onto")
+                fail("--phospho needs a reference .d (--bruker-reference <dia.d>) to render onto")
             if not a.search_fasta:
-                ap.error("--phospho needs --search-fasta (the DiaNN --monitor-mod search is the FLR measurement)")
-        build = timsim_bruker_v2_pipeline
-    else:
-        build = timsim_pipeline
+                fail("--phospho needs --search-fasta (the DiaNN --monitor-mod search is the FLR measurement)")
+        return timsim_bruker_v2_pipeline
+    return timsim_pipeline
+
+
+def job(P: Pipeline, config: dict) -> None:
+    """necroflow **job-TOML entry point** — the config-file face of this flow, and the target any GUI
+    should build against::
+
+        ".pipeline" = "flow/timsim_flow.py:job"
+        ".requests" = ["score"]
+        bruker_reference = "/data/ref.d"
+        proteome_spec    = "hela.toml"
+        noise_mz_ppm     = 6.5
+        noise_real_data  = true
+
+    Keys are the CLI flags with dashes as underscores (`--noise-mz-ppm` → `noise_mz_ppm`); everything not
+    given keeps its CLI default, so a TOML run and a command line run are the same run. `sample` picks the
+    design sample (default: the first of `samples`). Unknown keys are rejected rather than silently ignored
+    — a typo'd knob would otherwise produce a plausible-looking run of the wrong experiment."""
+    a = _parser().parse_args([])
+    unknown = [k for k in config if k not in vars(a) and k != "sample"]
+    if unknown:
+        raise SystemExit(f"unknown config key(s) {unknown}; valid keys: {sorted(vars(a))}")
+    for k, v in config.items():
+        if k != "sample":
+            setattr(a, k, v)
+    build = select_build(a)
+    sample = config.get("sample", a.samples[0])
+    build(P, build_cfg(a), sample)
+
+
+def main() -> None:
+    ap = _parser()
+    a = ap.parse_args()
+    cfg = build_cfg(a)
+    build = select_build(a, ap)
     dag = DAG(a.outdir)
     if a.quant:
         # HYE quant: ONE cross-sample pipeline (two renders → joint search → fold-change), not a per-sample

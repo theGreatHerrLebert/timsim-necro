@@ -1,0 +1,21 @@
+# necroflow job TOML — the config-file face of the flow (and the target a GUI builds against).
+# Run:  necroflow run job_example.toml     (from flow/configs)
+# Keys are the CLI flags with dashes as underscores; anything omitted keeps its CLI default.
+".pipeline" = "../timsim_flow.py:job"
+".requests" = ["score"]
+
+bruker_reference = "/media/hd02/data/raw/dia/blanks/blanks-dia-PASEF/G241217_011_Slot2-2_1_16312.d"
+proteome_spec    = "hela_proteome.toml"
+mods             = "mods_basic.toml"
+design_spec      = "design_hela.toml"
+max_peptides     = 5000
+sample           = "A_R1"
+
+# realism (REALISM_PLAN.md): v1's real DIA recipe is A1 + A2 together
+noise_mz_ppm    = 6.5
+noise_frag_ppm  = 6.5
+noise_real_data = true
+
+# phase 2: search + score (omit search_fasta to stop at the .d)
+search_fasta = "hela_subset.fasta"
+qvalue       = 0.01
