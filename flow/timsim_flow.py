@@ -119,7 +119,7 @@ class Proteome(NodeType):
     """The proteins. STRUCTURE — no amounts; abundance is a quantity and lives on its own axis."""
 
     filename = "proteome.parquet"
-    invalidator = hashes_file("spec")
+    invalidator = hashes_file("proteome_spec")
 
 
 class Peptides(NodeType):
@@ -144,7 +144,7 @@ class Modforms(NodeType):
     """Modified species, with the fraction of molecules in each. STRUCTURE."""
 
     filename = "modforms.parquet"
-    invalidator = hashes_file("mods")
+    invalidator = hashes_file("mods_spec")
 
 
 class Modifications(NodeType):
@@ -152,7 +152,7 @@ class Modifications(NodeType):
     never disagree about an occupancy."""
 
     filename = "modifications.parquet"
-    invalidator = hashes_file("mods")
+    invalidator = hashes_file("mods_spec")
 
 
 class Precursors(NodeType):
@@ -182,28 +182,28 @@ class Samples(NodeType):
     """The design: which samples exist, and the mixture that defines them."""
 
     filename = "samples.parquet"
-    invalidator = hashes_file("spec")
+    invalidator = hashes_file("design_spec")
 
 
 class Runs(NodeType):
     """The runs, and which sample each measures."""
 
     filename = "runs.parquet"
-    invalidator = hashes_file("spec")
+    invalidator = hashes_file("design_spec")
 
 
 class SampleRunMap(NodeType):
     """sample -> run. A sample measured twice is two runs, not two samples."""
 
     filename = "sample_run_map.parquet"
-    invalidator = hashes_file("spec")
+    invalidator = hashes_file("design_spec")
 
 
 class ProteinQuantities(NodeType):
     """Protein amounts per sample, in amol. QUANTITY."""
 
     filename = "protein_quantities.parquet"
-    invalidator = hashes_file("spec")
+    invalidator = hashes_file("design_spec")
 
 
 class PeptideQuantities(NodeType):
@@ -403,8 +403,8 @@ def do_render(cfg, sample_id, P, control=False):
     return render(P, *inputs, **common)  # noiseless / A1 (no control)
 
 
-@command(f"{BIN}/timsim-proteome --spec {{spec}} --out {{proteome}}")
-def proteome(spec: str):
+@command(f"{BIN}/timsim-proteome --spec {{proteome_spec}} --out {{proteome}}")
+def proteome(proteome_spec: str):
     """FASTAs -> proteins. STRUCTURE.
 
     Takes a multi-source spec rather than one FASTA, because that is what a real experiment is: HYE
@@ -437,10 +437,10 @@ def digest(proteome: Proteome, max_missed_cleavages: int, min_length: int, max_l
 
 
 @command(
-    f"{BIN}/timsim-modify --peptides {{peptides}} --mods {{mods}} "
+    f"{BIN}/timsim-modify --peptides {{peptides}} --mods {{mods_spec}} "
     "--out-modforms {modforms} --out-modifications {modifications} --floor {floor}"
 )
-def modify(peptides: Peptides, mods: str, floor: float):
+def modify(peptides: Peptides, mods_spec: str, floor: float):
     """Peptides -> modforms, driven by per-site OCCUPANCY rather than variable-mod combinatorics.
 
     Emits the modification spec alongside the modforms, because `yield` needs the same occupancies to
@@ -482,11 +482,11 @@ def rt(peptides: Peptides):
 
 
 @command(
-    f"{BIN}/timsim-design --proteome {{proteome}} --spec {{spec}} "
+    f"{BIN}/timsim-design --proteome {{proteome}} --spec {{design_spec}} "
     "--out-samples {samples} --out-runs {runs} --out-sample-run-map {sample_run_map} "
     "--out-protein-quantities {protein_quantities}"
 )
-def design(proteome: Proteome, spec: str):
+def design(proteome: Proteome, design_spec: str):
     """The mixture. QUANTITY — this is where an A/B experiment is *declared* rather than recovered
     from a filename afterwards."""
     samples = output(Samples)
@@ -1094,7 +1094,7 @@ def timsim_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     necroflow collapses them. The cache model is not implemented here; it is *implied* by declaring
     the dependencies honestly.
     """
-    P.proteome = proteome(P, spec=cfg.proteome_spec)
+    P.proteome = proteome(P, proteome_spec=cfg.proteome_spec)
 
     P.peptides, P.occurrences, P.cleavage_sites = digest(P, 
         P.proteome,
@@ -1105,7 +1105,7 @@ def timsim_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         seed=cfg.seed,
     )
 
-    P.modforms, P.modifications = modify(P, P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
 
     P.precursors = precursors(P, 
         P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed
@@ -1116,7 +1116,7 @@ def timsim_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     # The seed lives INSIDE the design spec, not on the command line — it is a property of the
     # experiment, and a flag would let the artifact and the caller disagree about it.
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
-        P.proteome, spec=cfg.design_spec
+        P.proteome, design_spec=cfg.design_spec
     )
 
     P.peptide_quantities = peptide_yield(P, 
@@ -1153,7 +1153,7 @@ def timsim_thermo_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     structure axis is computed once. CCS is omitted (no ion mobility). The instrument/method matrix is a
     fan-out over `cfg.template` × `cfg.frag_model`.
     """
-    P.proteome = proteome(P, spec=cfg.proteome_spec)
+    P.proteome = proteome(P, proteome_spec=cfg.proteome_spec)
     P.peptides, P.occurrences, P.cleavage_sites = digest(P, 
         P.proteome,
         max_missed_cleavages=cfg.max_missed_cleavages,
@@ -1162,11 +1162,11 @@ def timsim_thermo_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         max_peptides=cfg.max_peptides,
         seed=cfg.seed,
     )
-    P.modforms, P.modifications = modify(P, P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
     P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
-        P.proteome, spec=cfg.design_spec
+        P.proteome, design_spec=cfg.design_spec
     )
     P.peptide_quantities = peptide_yield(P, 
         P.proteome,
@@ -1219,7 +1219,7 @@ def timsim_bruker_v2_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     pipelines (same config -> same fingerprint), so requesting a Bruker-v2, a Thermo and a SCIEX run
     collapses the whole structure axis to one computation. Opt-in via `--bruker-reference <ref.d>`; the
     v1 `timsim_pipeline` stays the default (it owns DDA + the DIA truth output v2 does not yet emit)."""
-    P.proteome = proteome(P, spec=cfg.proteome_spec)
+    P.proteome = proteome(P, proteome_spec=cfg.proteome_spec)
     P.peptides, P.occurrences, P.cleavage_sites = digest(P, 
         P.proteome,
         max_missed_cleavages=cfg.max_missed_cleavages,
@@ -1228,12 +1228,12 @@ def timsim_bruker_v2_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         max_peptides=cfg.max_peptides,
         seed=cfg.seed,
     )
-    P.modforms, P.modifications = modify(P, P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
     P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
     P.ccs = ccs(P, P.precursors, P.peptides)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
-        P.proteome, spec=cfg.design_spec
+        P.proteome, design_spec=cfg.design_spec
     )
     P.peptide_quantities = peptide_yield(P, 
         P.proteome,
@@ -1310,7 +1310,7 @@ def timsim_hye_quant_pipeline(P: Pipeline, cfg, sample_ids) -> None:
     per-sample amounts from the shared `peptide_quantities`). `sample_ids` = [condition-A run, condition-B
     run] (e.g. ["A_R1", "B_R1"]); A is the reference. Opt-in via `--quant`. See HYE_QUANT.md."""
     sid_a, sid_b = sample_ids
-    P.proteome = proteome(P, spec=cfg.proteome_spec)
+    P.proteome = proteome(P, proteome_spec=cfg.proteome_spec)
     P.peptides, P.occurrences, P.cleavage_sites = digest(P, 
         P.proteome,
         max_missed_cleavages=cfg.max_missed_cleavages,
@@ -1319,12 +1319,12 @@ def timsim_hye_quant_pipeline(P: Pipeline, cfg, sample_ids) -> None:
         max_peptides=cfg.max_peptides,
         seed=cfg.seed,
     )
-    P.modforms, P.modifications = modify(P, P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
     P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
     P.ccs = ccs(P, P.precursors, P.peptides)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
-        P.proteome, spec=cfg.design_spec
+        P.proteome, design_spec=cfg.design_spec
     )
     P.peptide_quantities = peptide_yield(P, 
         P.proteome, P.occurrences, P.cleavage_sites, P.protein_quantities, P.modifications,
@@ -1360,7 +1360,7 @@ def timsim_bruker_dda_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     (so requesting DIA and DDA collapses the structure axis to one computation), but the measurement is
     `timsim-render --dda` (top-N selection) and phase-2 is Sage → `v2_dda_eval` (DiaNN is DIA-only).
     Opt-in via `--bruker-dda <ref.d>`."""
-    P.proteome = proteome(P, spec=cfg.proteome_spec)
+    P.proteome = proteome(P, proteome_spec=cfg.proteome_spec)
     P.peptides, P.occurrences, P.cleavage_sites = digest(P, 
         P.proteome,
         max_missed_cleavages=cfg.max_missed_cleavages,
@@ -1369,12 +1369,12 @@ def timsim_bruker_dda_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         max_peptides=cfg.max_peptides,
         seed=cfg.seed,
     )
-    P.modforms, P.modifications = modify(P, P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
     P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
     P.ccs = ccs(P, P.precursors, P.peptides)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
-        P.proteome, spec=cfg.design_spec
+        P.proteome, design_spec=cfg.design_spec
     )
     P.peptide_quantities = peptide_yield(P, 
         P.proteome,
@@ -1418,7 +1418,7 @@ def timsim_sciex_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     imspy-free, no `.wiff`. Reuses the SAME `frag_input → fragments → spectra` feature-space chain as the
     Thermo/Bruker pipelines (so requesting all three collapses the structure to one computation), then
     projects onto a synthesised SWATH schedule. No CCS (SCIEX has no ion mobility)."""
-    P.proteome = proteome(P, spec=cfg.proteome_spec)
+    P.proteome = proteome(P, proteome_spec=cfg.proteome_spec)
     P.peptides, P.occurrences, P.cleavage_sites = digest(P, 
         P.proteome,
         max_missed_cleavages=cfg.max_missed_cleavages,
@@ -1427,11 +1427,11 @@ def timsim_sciex_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         max_peptides=cfg.max_peptides,
         seed=cfg.seed,
     )
-    P.modforms, P.modifications = modify(P, P.peptides, mods=cfg.mods, floor=cfg.floor)
+    P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
     P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
-        P.proteome, spec=cfg.design_spec
+        P.proteome, design_spec=cfg.design_spec
     )
     P.peptide_quantities = peptide_yield(P, 
         P.proteome, P.occurrences, P.cleavage_sites, P.protein_quantities, P.modifications,
