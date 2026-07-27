@@ -212,6 +212,16 @@ class PeptideQuantities(NodeType):
     filename = "peptide_quantities.parquet"
 
 
+class YieldReport(NodeType):
+    """The `timsim-yield --report` accounting: missed-cleavage distribution, truncation/filter loss.
+
+    A GUARANTEED co-output — yield always writes it when `--report` is passed, so it can be declared as
+    one without ever poisoning cache classification by being intermittently absent. (Ported from the
+    Sample Designer's pipeline, which wired it first.)"""
+
+    filename = "yield_report.toml"
+
+
 class RawData(NodeType):
     """A Bruker .d — the MEASUREMENT. One per run.
 
@@ -500,7 +510,8 @@ def design(proteome: Proteome, design_spec: str):
     f"{BIN}/timsim-yield --proteome {{proteome}} --occurrences {{occurrences}} "
     "--cleavage-sites {cleavage_sites} --protein-quantities {protein_quantities} "
     "--modifications {modifications} "
-    "--digestion-efficiency {digestion_efficiency} --out {peptide_quantities}"
+    "--digestion-efficiency {digestion_efficiency} --out {peptide_quantities} "
+    "--report {yield_report}"
 )
 def peptide_yield(
     proteome: Proteome,
@@ -517,7 +528,8 @@ def peptide_yield(
     the missed cleavage it forces is how the experiment localises the site.
     """
     peptide_quantities = output(PeptideQuantities)
-    return peptide_quantities
+    yield_report = output(YieldReport)
+    return peptide_quantities, yield_report
 
 
 @command(
@@ -1119,7 +1131,7 @@ def timsim_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         P.proteome, design_spec=cfg.design_spec
     )
 
-    P.peptide_quantities = peptide_yield(P, 
+    P.peptide_quantities, P.yield_report = peptide_yield(P, 
         P.proteome,
         P.occurrences,
         P.cleavage_sites,
@@ -1168,7 +1180,7 @@ def timsim_thermo_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, design_spec=cfg.design_spec
     )
-    P.peptide_quantities = peptide_yield(P, 
+    P.peptide_quantities, P.yield_report = peptide_yield(P, 
         P.proteome,
         P.occurrences,
         P.cleavage_sites,
@@ -1235,7 +1247,7 @@ def timsim_bruker_v2_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, design_spec=cfg.design_spec
     )
-    P.peptide_quantities = peptide_yield(P, 
+    P.peptide_quantities, P.yield_report = peptide_yield(P, 
         P.proteome,
         P.occurrences,
         P.cleavage_sites,
@@ -1326,7 +1338,7 @@ def timsim_hye_quant_pipeline(P: Pipeline, cfg, sample_ids) -> None:
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, design_spec=cfg.design_spec
     )
-    P.peptide_quantities = peptide_yield(P, 
+    P.peptide_quantities, P.yield_report = peptide_yield(P, 
         P.proteome, P.occurrences, P.cleavage_sites, P.protein_quantities, P.modifications,
         digestion_efficiency=cfg.digestion_efficiency,
     )
@@ -1376,7 +1388,7 @@ def timsim_bruker_dda_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, design_spec=cfg.design_spec
     )
-    P.peptide_quantities = peptide_yield(P, 
+    P.peptide_quantities, P.yield_report = peptide_yield(P, 
         P.proteome,
         P.occurrences,
         P.cleavage_sites,
@@ -1433,7 +1445,7 @@ def timsim_sciex_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, design_spec=cfg.design_spec
     )
-    P.peptide_quantities = peptide_yield(P, 
+    P.peptide_quantities, P.yield_report = peptide_yield(P, 
         P.proteome, P.occurrences, P.cleavage_sites, P.protein_quantities, P.modifications,
         digestion_efficiency=cfg.digestion_efficiency,
     )
