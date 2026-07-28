@@ -62,8 +62,26 @@ matched the timsTOF core AND gone beyond it:
 - **Provenance / mzPROV** (Ed25519 signing embedded in the `.d`) — defer indefinitely; orthogonal to
   fidelity, adds a crypto dep.
 - **Preview video generation** — pure cosmetic. Drop.
-- **Waters SONAR** — fully-synthesized mzML (mirrors SCIEX, ~trivial) BUT very low demand. Build only if a
-  collaborator actually needs Waters. Keep as a "known-cheap" note, not a task.
+- **Waters** — investigated 2026-07-28; decided **not to build**. The blocker is validation, not effort, so
+  do not reopen this on cost grounds.
+  - "Waters" is not one axis. **SONAR** (scanning quadrupole) is genuinely window-based and maps onto
+    `AcquisitionScheme`; **MSe/HDMSe** use *no quadrupole selection at all*, so our core assumption (MS2
+    gated by an isolation window) degenerates to "one window spanning everything" — representable but
+    semantically empty. UDMSe's drift-dependent collision energy has no `CollisionEnergyModel` variant.
+  - The cost estimate was right: SONAR is ~100 changed lines reusing `render_sciex.rs` (only ~60 of its ~360
+    lines are SCIEX-specific), and the eval harness needs **zero** changes.
+  - But it would be **unvalidatable**. No real Waters run ⇒ no template and no golden baseline, unlike
+    Thermo (authors into a real `.raw`) and Bruker (renders onto a real `.d`) — the axis would be validated
+    only against itself. DIA-NN has no native Waters reader; SONAR "appears to work" via mzML and is
+    self-described as untested upstream, so a weak recall number would be unattributable (simulator vs
+    converter vs engine). The one engine with native SONAR + HDMSe support is Spectronaut, which we do not
+    have and will not obtain.
+  - **TWIMS is a subsystem, not a variant.** No Mason-Schamp; CCS→arrival-time needs a power-law calibration
+    fitted from a real Waters run at matching wave velocity/gas conditions, plus a new `MobilityModality`, an
+    arrival-time grid, and ion-mobility arrays in the mzML writer (we emit none).
+  - **Revisit only if a collaborator brings Waters data** — they supply the two missing things, a template
+    file and engine access. Demand signal is weak regardless: Waters DIA proteomics is niche, and the 2026
+    portfolio leans structural/spatial.
 - **Explicit synchro/midia/Slice-PASEF configs** — come **free** via reference-`.d` scheme replay; no
   dedicated port.
 - **Legacy intensity knobs** (`intensity_mean/min/max/value`) — already dead in v1 (`_LEGACY_IGNORED_KEYS`).
