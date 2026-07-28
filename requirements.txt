@@ -1,6 +1,10 @@
 # timsim-necro ingests ONLY the lean simulator pieces — no imspy monorepo.
 #
-# Orchestration framework (the typed DAG):
+# Orchestration framework (the typed DAG).
+# REQUIRES >= 0.0.4 — the flow uses the module-level rule API; 0.0.3 and earlier will not import it.
+# A PEP 508 direct-URL requirement cannot carry a version specifier, and upstream has no v0.0.4 tag to
+# pin to, so the floor cannot be expressed here. The default branch is at or above 0.0.4; if you need
+# the constraint enforced, install the released wheel instead:  pip install 'necroflow>=0.0.4'
 necroflow @ git+https://github.com/MatteoLacki/necroflow
 #
 # Prediction jobs (timsim-ccs / timsim-rt / timsim-fragments) — the pipeline's measurement step.
