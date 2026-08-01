@@ -472,8 +472,12 @@ def precursors(peptides: Peptides, modforms: Modforms, charge_model: str, seed: 
     return precursors
 
 
+# ram: MEASURED, not guessed — 4.4 GB peak on a full-proteome HeLa run (9,010,877 precursors,
+# 2026-08-01) after the chunked-tokenizer fix. Before that fix this stage peaked at 24.9 GB and was
+# SIGKILLed. See the note above `fragments` on why these declarations matter.
 @command(
-    "timsim-ccs --precursors {precursors} --peptides {peptides} --out {precursor_ccs}"
+    "timsim-ccs --precursors {precursors} --peptides {peptides} --out {precursor_ccs}",
+    ram="6Gi",
 )
 def ccs(precursors: Precursors, peptides: Peptides):
     """Precursors -> CCS. STRUCTURE, and the one Python tool in the structure axis (the deep model
@@ -586,9 +590,18 @@ def frag_input(precursors: Precursors, peptides: Peptides, modforms: Modforms, m
     return fragment_prediction_input
 
 
+# ram: MEASURED at 15.4 GB peak on a full-proteome HeLa run (9,010,877 precursors -> 462,789,095
+# fragment rows, 2026-08-01). This is the largest consumer in the pipeline and it was previously
+# UNDECLARED, so necroflow scheduled it concurrently with `ccs` (both started in the same second on
+# 2026-07-30). The combined footprint drove the box into deep swap, which silently corrupted 4
+# floating-point values in the downstream `ion_spectra` artifact — see
+# PhantomBENCH/simulations/v2/work/nodes/spectra/2a6187cf*/PROVENANCE-NOTE.md. Declaring real numbers
+# is what stops the scheduler co-locating two stages that cannot both fit.
+# NOTE: the historical note "streamed to ~1 GB" is wrong at this scale; treat 16Gi as the floor.
 @command(
     "timsim-fragments --precursors {fragment_prediction_input} "
-    "--collision-energy {collision_energy} --model {frag_model} --out {fragment_intensities}"
+    "--collision-energy {collision_energy} --model {frag_model} --out {fragment_intensities}",
+    ram="16Gi",
 )
 def fragments(fragment_prediction_input: FragmentPredictionInput, collision_energy: float, frag_model: str):
     """Annotated input -> predicted fragment intensities. MEASUREMENT, instrument-DEPENDENT: `frag_model`
@@ -598,10 +611,15 @@ def fragments(fragment_prediction_input: FragmentPredictionInput, collision_ener
     return fragment_intensities
 
 
+# ram: MEASURED at 4.86 GB peak on a full-proteome HeLa run (2026-08-01) with the chunked/streaming
+# implementation (timsim-cli bb56ff2). The PREVIOUS implementation held the precursor->fragment map,
+# every generated spectrum, and the Arrow copy simultaneously and peaked at 24.4 GB on the same input
+# — do not restore a value sized for that version.
 @command(
     f"{BIN}/timsim-spectra --precursors {{precursors}} --peptides {{peptides}} "
     "--modforms {modforms} --modifications {modifications} "
-    "--fragment-intensities {fragment_intensities} --out {ion_spectra}"
+    "--fragment-intensities {fragment_intensities} --out {ion_spectra}",
+    ram="6Gi",
 )
 def spectra(
     precursors: Precursors,
