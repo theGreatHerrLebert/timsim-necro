@@ -1566,6 +1566,28 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--proteome-spec", default="hye.toml", help="multi-FASTA proteome spec")
     ap.add_argument("--mods", default="mods.toml", help="modification spec (e.g. mods_basic.toml for a light HeLa run)")
     ap.add_argument("--design-spec", default="design.toml", help="experiment design spec (e.g. design_hela.toml for a single-organism run)")
+    # --- realism knobs (all default OFF, so nothing changes unless asked) -------------------
+    ap.add_argument("--ion-count-noise", action="store_true",
+                    help="Poisson counting statistics on the ANALYTE signal (distinct from "
+                         "--noise-real-data, which injects real BACKGROUND). Roughens traces near "
+                         "the floor; leaves bright peaks smooth, as counting does.")
+    ap.add_argument("--instrument-cv", type=float, default=0.0,
+                    help="common-mode spray/transmission fluctuation, as the TOTAL per-bin CV. "
+                         "Intensity-independent, so unlike --ion-count-noise it roughens BRIGHT "
+                         "peaks too (v2's form of v1 noise_frame/scan_abundance).")
+    ap.add_argument("--run-rt-sd", type=float, default=0.0,
+                    help="per-run RT displacement, SECONDS sd (v1 rt_variation_std)")
+    ap.add_argument("--run-im-sd", type=float, default=0.0,
+                    help="per-run mobility displacement, 1/K0 sd (v1 ion_mobility_variation_std)")
+    ap.add_argument("--run-intensity-cv", type=float, default=0.0,
+                    help="per-run intensity variation, CV (v1 intensity_variation_std)")
+    ap.add_argument("--target-p", type=float, default=0.0,
+                    help="v1's cumulative-probability peak truncation (0.999); 0 leaves --n-sigma in charge")
+    ap.add_argument("--min-charge-contrib", type=float, default=0.0,
+                    help="drop charge states below this share of a modform's charged mass (v1's "
+                         "dia-PASEF config uses 0.25). NOTE this is on the STRUCTURE axis, so it "
+                         "re-fingerprints precursors and everything downstream, including the "
+                         "fragment predictions.")
     ap.add_argument("--samples", nargs="+", default=["A_R1", "B_R1"])
     ap.add_argument("--max-peptides", type=int, default=0,
                     help="cap the simulated peptides to this many (seeded sample; 0 = full analytic digest). "
@@ -1663,6 +1685,9 @@ def build_cfg(a) -> SimpleNamespace:
         n_sigma=getattr(a, "n_sigma", 3.0),
         min_charge_contrib=getattr(a, "min_charge_contrib", 0.0),
         # A bare flag, so it is "" (absent) or "--ion-count-noise " (present).
+        # A rendered COMMAND FRAGMENT, not a boolean: necroflow templates cannot express a
+        # conditional, so the flag is materialised here, once. Passing True would emit
+        # "True--instrument-cv"; the name says fragment to make that mistake visible.
         ion_count_noise=("--ion-count-noise " if getattr(a, "ion_count_noise", False) else ""),
         instrument_cv=getattr(a, "instrument_cv", 0.0),
         run_rt_sd=getattr(a, "run_rt_sd", 0.0),
