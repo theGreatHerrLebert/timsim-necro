@@ -463,9 +463,14 @@ def modify(peptides: Peptides, mods_spec: str, floor: float):
 
 @command(
     f"{BIN}/timsim-precursors --peptides {{peptides}} --modforms {{modforms}} "
-    "--out {precursors} --charge-model {charge_model} --seed {seed}"
+    "--out {precursors} --charge-model {charge_model} --seed {seed} "
+    # v1 drops charge states below a share of the charged mass (its dia-PASEF config uses 0.25);
+    # v2 kept every state above zero, which renders precursors no instrument would record.
+    # 0 = keep everything (v2's historical behaviour).
+    "--min-charge-contrib {min_charge_contrib}"
 )
-def precursors(peptides: Peptides, modforms: Modforms, charge_model: str, seed: int):
+def precursors(peptides: Peptides, modforms: Modforms, charge_model: str, seed: int,
+               min_charge_contrib: float = 0.0):
     """Modforms -> ions. STRUCTURE: m/z and isotope envelopes are properties of the molecule, so
     they are shared by every sample too."""
     precursors = output(Precursors)
@@ -681,6 +686,21 @@ _RENDER_HEAD = (
     "--ion-spectra {ion_spectra} --precursor-ccs {precursor_ccs} "
     "--peptide-quantities {peptide_quantities} --sample {sample_id} "
     "--reference-d {reference_d} --dia --intensity-scale {intensity_scale} "
+    # EXPLICIT even though these are the binary's own defaults. necroflow fingerprints on the COMMAND
+    # STRING, so a default that changes behaviour without changing the command is invisible to the
+    # cache: a render made by an older binary looks current and is silently reused. All four changed
+    # on 2026-08-11 (peak shape went per-peptide, the clock started inheriting from the reference,
+    # per-ion mobility widths arrived) and each moves the rendered SIGNAL. Naming them here is what
+    # makes the cache correct rather than merely current -- the artifact provenance stamp detects a
+    # stale result after the fact, it does not prevent one being produced and reused.
+    "--peak-shape {peak_shape} --cycle-seconds {cycle_seconds} "
+    "--mobility-std-target {mobility_std_target} --n-sigma {n_sigma} "
+    # A3 + run-to-run measurement variation. A3 is counting statistics on the ANALYTE signal
+    # (distinct from --noise-real-data, which is background); the run-* terms displace a peak
+    # per run, keyed on (sample, precursor), so technical replicates stop being bit-identical.
+    "{ion_count_noise}--instrument-cv {instrument_cv} "
+    "--run-rt-sd {run_rt_sd} --run-im-sd {run_im_sd} "
+    "--run-intensity-cv {run_intensity_cv} --target-p {target_p} "
     "--noise-mz-ppm {noise_mz_ppm} --noise-frag-ppm {noise_frag_ppm} --noise-seed {noise_seed}"
 )
 _RENDER_A2 = (
@@ -696,6 +716,11 @@ def render(
     precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
     peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
     noise_mz_ppm: float = 0.0, noise_frag_ppm: float = 0.0, noise_seed: int = 0,
+    peak_shape: str = "per-peptide", cycle_seconds: float = 0.0,
+    mobility_std_target: float = 0.009, n_sigma: float = 3.0,
+    ion_count_noise: str = "", instrument_cv: float = 0.0,
+    run_rt_sd: float = 0.0, run_im_sd: float = 0.0,
+    run_intensity_cv: float = 0.0, target_p: float = 0.0,
 ):
     """MEASUREMENT (Bruker): the lean v2 projector places `ion_spectra` onto the reference `.d`'s DIA grid.
     A1 signal-m/z noise is always wired (`--noise-mz-ppm/-frag-ppm`; 0 = off, byte-identical). One node per
@@ -712,6 +737,11 @@ def render_a2(
     noise_mz_ppm: float, noise_frag_ppm: float, noise_seed: int,
     noise_precursor_frames: int, noise_fragment_frames: int, noise_intensity_max: float,
     noise_precursor_fraction: float, noise_fragment_fraction: float,
+    peak_shape: str = "per-peptide", cycle_seconds: float = 0.0,
+    mobility_std_target: float = 0.009, n_sigma: float = 3.0,
+    ion_count_noise: str = "", instrument_cv: float = 0.0,
+    run_rt_sd: float = 0.0, run_im_sd: float = 0.0,
+    run_intensity_cv: float = 0.0, target_p: float = 0.0,
 ):
     """render + A2 real-data background sampled from the reference `.d` (the v1 DIA recipe with A1)."""
     raw = output(BrukerRawDataV2)
@@ -726,6 +756,11 @@ def render_a2_control(
     noise_mz_ppm: float, noise_frag_ppm: float, noise_seed: int,
     noise_precursor_frames: int, noise_fragment_frames: int, noise_intensity_max: float,
     noise_precursor_fraction: float, noise_fragment_fraction: float,
+    peak_shape: str = "per-peptide", cycle_seconds: float = 0.0,
+    mobility_std_target: float = 0.009, n_sigma: float = 3.0,
+    ion_count_noise: str = "", instrument_cv: float = 0.0,
+    run_rt_sd: float = 0.0, run_im_sd: float = 0.0,
+    run_intensity_cv: float = 0.0, target_p: float = 0.0,
 ):
     """A2 background-ONLY control (`--noise-only`): the real-data background alone, same seed — searched, its
     IDs subtracted from FDP (score_bruker_bg)."""
@@ -739,6 +774,11 @@ def render_spike(
     precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
     peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
     noise_mz_ppm: float, noise_frag_ppm: float, noise_seed: int, spike_into: str,
+    peak_shape: str = "per-peptide", cycle_seconds: float = 0.0,
+    mobility_std_target: float = 0.009, n_sigma: float = 3.0,
+    ion_count_noise: str = "", instrument_cv: float = 0.0,
+    run_rt_sd: float = 0.0, run_im_sd: float = 0.0,
+    run_intensity_cv: float = 0.0, target_p: float = 0.0,
 ):
     """Spike-into-real: overlay the synthetic signal additively onto a real `.d` (`--spike-into`)."""
     raw = output(BrukerRawDataV2)
@@ -751,6 +791,11 @@ def render_spike_control(
     precursors: Precursors, peptide_rt: PeptideRT, ion_spectra: IonSpectra, precursor_ccs: PrecursorCCS,
     peptide_quantities: PeptideQuantities, reference_d: str, sample_id: str, intensity_scale: float,
     noise_mz_ppm: float, noise_frag_ppm: float, noise_seed: int, spike_into: str,
+    peak_shape: str = "per-peptide", cycle_seconds: float = 0.0,
+    mobility_std_target: float = 0.009, n_sigma: float = 3.0,
+    ion_count_noise: str = "", instrument_cv: float = 0.0,
+    run_rt_sd: float = 0.0, run_im_sd: float = 0.0,
+    run_intensity_cv: float = 0.0, target_p: float = 0.0,
 ):
     """Spike background control (`--spike-into X --noise-only`): a re-encoded copy of X, no synthetic —
     searched, its IDs subtracted from FDP."""
@@ -769,6 +814,11 @@ def render_spike_control(
     f"{BIN}/timsim-render --dda --precursors {{precursors}} --peptide-rt {{peptide_rt}} "
     "--ion-spectra {ion_spectra} --precursor-ccs {precursor_ccs} --peptide-quantities {peptide_quantities} "
     "--sample {sample_id} --reference-d {reference_d} --intensity-scale {intensity_scale} "
+    # Same fingerprint reasoning as _RENDER_HEAD: these are the binary's defaults, named here
+    # so a behaviour change in them invalidates the cache instead of hiding in it. The DDA path
+    # took the same peak-shape / clock / per-ion-mobility changes as DIA.
+    "--peak-shape {peak_shape} --cycle-seconds {cycle_seconds} "
+    "--mobility-std-target {mobility_std_target} --n-sigma {n_sigma} "
     "--precursors-every {precursors_every} --max-precursors {max_precursors} --exclusion-width {exclusion_width} "
     "--out {raw} --dda-truth {truth}",
     threads=2,
@@ -786,6 +836,8 @@ def render_dda(
     precursors_every: int,
     max_precursors: int,
     exclusion_width: int,
+    peak_shape: str = "per-peptide", cycle_seconds: float = 0.0,
+    mobility_std_target: float = 0.009, n_sigma: float = 3.0,
 ):
     """MEASUREMENT (Bruker DDA-PASEF): MS1 surveys every `precursors_every` frames, top-N (`max_precursors`)
     precursor selection with `exclusion_width`-frame dynamic exclusion, band-limited MS2 on the reference's
@@ -1605,6 +1657,18 @@ def build_cfg(a) -> SimpleNamespace:
         collision_energy=a.collision_energy,
         intensity_scale=a.intensity_scale,
         noise_mz_ppm=a.noise_mz_ppm,
+        peak_shape=getattr(a, "peak_shape", "per-peptide"),
+        cycle_seconds=getattr(a, "cycle_seconds", 0.0),
+        mobility_std_target=getattr(a, "mobility_std_target", 0.009),
+        n_sigma=getattr(a, "n_sigma", 3.0),
+        min_charge_contrib=getattr(a, "min_charge_contrib", 0.0),
+        # A bare flag, so it is "" (absent) or "--ion-count-noise " (present).
+        ion_count_noise=("--ion-count-noise " if getattr(a, "ion_count_noise", False) else ""),
+        instrument_cv=getattr(a, "instrument_cv", 0.0),
+        run_rt_sd=getattr(a, "run_rt_sd", 0.0),
+        run_im_sd=getattr(a, "run_im_sd", 0.0),
+        run_intensity_cv=getattr(a, "run_intensity_cv", 0.0),
+        target_p=getattr(a, "target_p", 0.0),
         noise_frag_ppm=a.noise_frag_ppm,
         noise_mz_uniform=a.noise_mz_uniform,
         noise_seed=a.noise_seed,
