@@ -403,7 +403,15 @@ def do_render(cfg, sample_id, P, control=False):
     background-only variant (`--noise-only`) for the FDP-subtraction control. Returns (raw, truth)."""
     inputs = (P.precursors, P.rt, P.ion_spectra, P.ccs, P.peptide_quantities)
     common = dict(reference_d=cfg.reference_d, sample_id=sample_id,
-                  intensity_scale=cfg.intensity_scale, **_a1_kwargs(cfg))
+                  intensity_scale=cfg.intensity_scale, **_a1_kwargs(cfg),
+                  # Named explicitly rather than left to the function defaults: necroflow requires
+                  # every declared input to be passed, and — more importantly — these are what the
+                  # command-string fingerprint sees. See the note on _RENDER_HEAD.
+                  peak_shape=cfg.peak_shape, cycle_seconds=cfg.cycle_seconds,
+                  mobility_std_target=cfg.mobility_std_target, n_sigma=cfg.n_sigma,
+                  ion_count_noise=str(cfg.ion_count_noise).lower(), instrument_cv=cfg.instrument_cv,
+                  run_rt_sd=cfg.run_rt_sd, run_im_sd=cfg.run_im_sd,
+                  run_intensity_cv=cfg.run_intensity_cv, target_p=cfg.target_p)
     if getattr(cfg, "spike_into", None):
         fn = render_spike_control if control else render_spike
         return fn(P, *inputs, spike_into=cfg.spike_into, **common)
@@ -698,7 +706,7 @@ _RENDER_HEAD = (
     # A3 + run-to-run measurement variation. A3 is counting statistics on the ANALYTE signal
     # (distinct from --noise-real-data, which is background); the run-* terms displace a peak
     # per run, keyed on (sample, precursor), so technical replicates stop being bit-identical.
-    "{ion_count_noise}--instrument-cv {instrument_cv} "
+    "--ion-count-noise {ion_count_noise} --instrument-cv {instrument_cv} "
     "--run-rt-sd {run_rt_sd} --run-im-sd {run_im_sd} "
     "--run-intensity-cv {run_intensity_cv} --target-p {target_p} "
     "--noise-mz-ppm {noise_mz_ppm} --noise-frag-ppm {noise_frag_ppm} --noise-seed {noise_seed}"
@@ -718,7 +726,7 @@ def render(
     noise_mz_ppm: float = 0.0, noise_frag_ppm: float = 0.0, noise_seed: int = 0,
     peak_shape: str = "per-peptide", cycle_seconds: float = 0.0,
     mobility_std_target: float = 0.009, n_sigma: float = 3.0,
-    ion_count_noise: str = "", instrument_cv: float = 0.0,
+    ion_count_noise: str = "false", instrument_cv: float = 0.0,
     run_rt_sd: float = 0.0, run_im_sd: float = 0.0,
     run_intensity_cv: float = 0.0, target_p: float = 0.0,
 ):
@@ -739,7 +747,7 @@ def render_a2(
     noise_precursor_fraction: float, noise_fragment_fraction: float,
     peak_shape: str = "per-peptide", cycle_seconds: float = 0.0,
     mobility_std_target: float = 0.009, n_sigma: float = 3.0,
-    ion_count_noise: str = "", instrument_cv: float = 0.0,
+    ion_count_noise: str = "false", instrument_cv: float = 0.0,
     run_rt_sd: float = 0.0, run_im_sd: float = 0.0,
     run_intensity_cv: float = 0.0, target_p: float = 0.0,
 ):
@@ -758,7 +766,7 @@ def render_a2_control(
     noise_precursor_fraction: float, noise_fragment_fraction: float,
     peak_shape: str = "per-peptide", cycle_seconds: float = 0.0,
     mobility_std_target: float = 0.009, n_sigma: float = 3.0,
-    ion_count_noise: str = "", instrument_cv: float = 0.0,
+    ion_count_noise: str = "false", instrument_cv: float = 0.0,
     run_rt_sd: float = 0.0, run_im_sd: float = 0.0,
     run_intensity_cv: float = 0.0, target_p: float = 0.0,
 ):
@@ -776,7 +784,7 @@ def render_spike(
     noise_mz_ppm: float, noise_frag_ppm: float, noise_seed: int, spike_into: str,
     peak_shape: str = "per-peptide", cycle_seconds: float = 0.0,
     mobility_std_target: float = 0.009, n_sigma: float = 3.0,
-    ion_count_noise: str = "", instrument_cv: float = 0.0,
+    ion_count_noise: str = "false", instrument_cv: float = 0.0,
     run_rt_sd: float = 0.0, run_im_sd: float = 0.0,
     run_intensity_cv: float = 0.0, target_p: float = 0.0,
 ):
@@ -793,7 +801,7 @@ def render_spike_control(
     noise_mz_ppm: float, noise_frag_ppm: float, noise_seed: int, spike_into: str,
     peak_shape: str = "per-peptide", cycle_seconds: float = 0.0,
     mobility_std_target: float = 0.009, n_sigma: float = 3.0,
-    ion_count_noise: str = "", instrument_cv: float = 0.0,
+    ion_count_noise: str = "false", instrument_cv: float = 0.0,
     run_rt_sd: float = 0.0, run_im_sd: float = 0.0,
     run_intensity_cv: float = 0.0, target_p: float = 0.0,
 ):
@@ -1245,7 +1253,8 @@ def timsim_thermo_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         seed=cfg.seed,
     )
     P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
-    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed,
+                             min_charge_contrib=cfg.min_charge_contrib)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, design_spec=cfg.design_spec
@@ -1311,7 +1320,8 @@ def timsim_bruker_v2_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         seed=cfg.seed,
     )
     P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
-    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed,
+                             min_charge_contrib=cfg.min_charge_contrib)
     P.ccs = ccs(P, P.precursors, P.peptides)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
@@ -1402,7 +1412,8 @@ def timsim_hye_quant_pipeline(P: Pipeline, cfg, sample_ids) -> None:
         seed=cfg.seed,
     )
     P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
-    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed,
+                             min_charge_contrib=cfg.min_charge_contrib)
     P.ccs = ccs(P, P.precursors, P.peptides)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
@@ -1452,7 +1463,8 @@ def timsim_bruker_dda_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         seed=cfg.seed,
     )
     P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
-    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed,
+                             min_charge_contrib=cfg.min_charge_contrib)
     P.ccs = ccs(P, P.precursors, P.peptides)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
@@ -1510,7 +1522,8 @@ def timsim_sciex_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         seed=cfg.seed,
     )
     P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
-    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed)
+    P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed,
+                             min_charge_contrib=cfg.min_charge_contrib)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, design_spec=cfg.design_spec
@@ -1685,10 +1698,7 @@ def build_cfg(a) -> SimpleNamespace:
         n_sigma=getattr(a, "n_sigma", 3.0),
         min_charge_contrib=getattr(a, "min_charge_contrib", 0.0),
         # A bare flag, so it is "" (absent) or "--ion-count-noise " (present).
-        # A rendered COMMAND FRAGMENT, not a boolean: necroflow templates cannot express a
-        # conditional, so the flag is materialised here, once. Passing True would emit
-        # "True--instrument-cv"; the name says fragment to make that mistake visible.
-        ion_count_noise=("--ion-count-noise " if getattr(a, "ion_count_noise", False) else ""),
+        ion_count_noise=bool(getattr(a, "ion_count_noise", False)),
         instrument_cv=getattr(a, "instrument_cv", 0.0),
         run_rt_sd=getattr(a, "run_rt_sd", 0.0),
         run_im_sd=getattr(a, "run_im_sd", 0.0),
