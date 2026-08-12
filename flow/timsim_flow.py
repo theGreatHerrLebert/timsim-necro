@@ -968,6 +968,37 @@ def search_bruker(
     return diann
 
 
+
+# Same as `search_bruker`, but reusing an already-built predicted library instead of
+# regenerating it. The library is a deterministic function of the FASTA and the digest
+# settings, NOT of the data -- for the 20,535-protein human proteome it costs ~42 min and
+# 2.1 GB, so a 15-arm ramp that rebuilds it per arm burns ~11 h producing identical bytes.
+@command(
+    f"mkdir -p {{diann}} && {DIANN} "
+    "--f {data_d} --fasta {search_fasta} --out {diann}/report.parquet "
+    "--lib {speclib} --qvalue {qvalue} --threads {search_threads} "
+    "--met-excision --cut 'K*,R*' --missed-cleavages {max_missed_cleavages} "
+    "--min-pep-len {min_length} --max-pep-len {max_length} --var-mods 1 --unimod35",
+    threads=16,
+    ram="32Gi",
+)
+def search_bruker_lib(
+    data_d: BrukerRawDataV2,
+    search_fasta: str,
+    speclib: str,
+    qvalue: float,
+    search_threads: int,
+    max_missed_cleavages: int,
+    min_length: int,
+    max_length: int,
+):
+    """SEARCH (Bruker dia-PASEF): DiaNN library-free over the rendered `.d`. Unlike the Thermo `.raw`, a
+    Bruker `.d` is DiaNN's NATIVE input on Linux — no .NET runtime. The FASTA is a content-hashed
+    dependency; a different render or DB is a different search."""
+    diann = output(DiannReport)
+    return diann
+
+
 @command(
     "python -m timsim_eval.v2_thermo_eval "
     "--report {diann}/report.parquet --truth {truth} --peptides {peptides} "
@@ -1364,7 +1395,11 @@ def timsim_bruker_v2_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
             qvalue=cfg.qvalue, flr_target=cfg.flr_target,
         )
     elif getattr(cfg, "search_fasta", None):
-        P.diann = search_bruker(P, 
+        # A prebuilt library routes to the sibling rule; see search_bruker_lib for why this is a
+        # separate rule rather than a conditional flag.
+        _search = search_bruker_lib if getattr(cfg, "speclib", None) else search_bruker
+        _lib_kw = {"speclib": cfg.speclib} if getattr(cfg, "speclib", None) else {}
+        P.diann = _search(P, 
             P.raw,
             search_fasta=cfg.search_fasta,
             qvalue=cfg.qvalue,
@@ -1372,6 +1407,7 @@ def timsim_bruker_v2_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
             max_missed_cleavages=cfg.max_missed_cleavages,
             min_length=cfg.min_length,
             max_length=cfg.max_length,
+            **_lib_kw
         )
         if getattr(cfg, "noise_real_data", False) or getattr(cfg, "spike_into", None):
             # Real-data background (A2 sampled blank, or spike-into a real run): the real peptides get
@@ -1596,6 +1632,10 @@ def _parser() -> argparse.ArgumentParser:
                     help="per-run intensity variation, CV (v1 intensity_variation_std)")
     ap.add_argument("--target-p", type=float, default=0.0,
                     help="v1's cumulative-probability peak truncation (0.999); 0 leaves --n-sigma in charge")
+    ap.add_argument("--speclib", default=None,
+                    help="reuse a prebuilt DIA-NN .speclib instead of regenerating it from the FASTA "
+                         "on every run (~42 min / 2.1 GB for the human proteome). Deterministic from "
+                         "the FASTA + digest settings, so reuse is equivalent.")
     ap.add_argument("--min-charge-contrib", type=float, default=0.0,
                     help="drop charge states below this share of a modform's charged mass (v1's "
                          "dia-PASEF config uses 0.25). NOTE this is on the STRUCTURE axis, so it "
@@ -1697,6 +1737,7 @@ def build_cfg(a) -> SimpleNamespace:
         mobility_std_target=getattr(a, "mobility_std_target", 0.009),
         n_sigma=getattr(a, "n_sigma", 3.0),
         min_charge_contrib=getattr(a, "min_charge_contrib", 0.0),
+        speclib=getattr(a, "speclib", None),
         # A bare flag, so it is "" (absent) or "--ion-count-noise " (present).
         ion_count_noise=bool(getattr(a, "ion_count_noise", False)),
         instrument_cv=getattr(a, "instrument_cv", 0.0),
