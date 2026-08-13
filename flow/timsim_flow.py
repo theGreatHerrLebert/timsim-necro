@@ -28,6 +28,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -375,6 +377,73 @@ DOTNET = os.environ.get("DOTNET_ROOT", os.path.expanduser("~/.dotnet"))
 # overridden per run with `-f`. Built from lazear/sage with the local `.d` read patch.
 SAGE = os.environ.get("TIMSIM_SAGE", "/home/administrator/Documents/promotion/rust/sage/target/release/sage")
 SAGE_CONFIG = os.environ.get("TIMSIM_SAGE_CONFIG", "/scratch/timsim-demo/SAGEBench/configs/sage-smoke.json")
+
+
+# ── tool identity ────────────────────────────────────────────────────────────
+#
+# necroflow fingerprints {rule, command, config, parents, input/output types}. A binary's PATH is in
+# the command template; its CONTENT is not. So rebuilding `timsim-render` with materially different
+# behaviour left every node dir fingerprinting identical, and a rerun cache-hit the stale artifacts
+# and reported them up-to-date.
+#
+# That was not hypothetical: `timsim-cli` bbe8455 changed the default intensity floor from 1 to
+# "inherit from the reference", which moved simulated p50 from 23 to 55 and cut identifications 41%.
+# The ramp-004 tree still resolved to the pre-change render. Three manifests had carried "any rebuild
+# invalidates this" as a HUMAN note; nothing enforced it.
+#
+# Fix: stamp each command template with the content hash of every timsim binary it names, so the
+# binary participates in the fingerprint. `_stamp` wraps `command` below, so this applies to every
+# rule in this file with no call-site changes.
+
+_TOOL_SHA: dict[str, str] = {}
+
+
+def _tool_sha(name: str) -> str:
+    """Content hash of one tool, memoised. Unresolvable tools hash as `?` rather than raising: a
+    pipeline that does not use the missing tool must still be runnable (e.g. no Sage installed)."""
+    if name not in _TOOL_SHA:
+        path = Path(BIN) / name
+        resolved = str(path) if path.is_file() else shutil.which(name)
+        if resolved is None:
+            _TOOL_SHA[name] = "?"
+        else:
+            h = hashlib.sha256()
+            with open(resolved, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            _TOOL_SHA[name] = h.hexdigest()[:16]
+    return _TOOL_SHA[name]
+
+
+def _stamp(template: str) -> str:
+    """Append `# tools:<name>=<sha>,...` for every timsim binary named in the template.
+
+    A trailing `#` comment is inert in the shell but IS part of the command string necroflow hashes,
+    so a rebuilt binary now yields a different fingerprint. Only `timsim-*` tools are stamped —
+    DiaNN and Sage are pinned external releases whose paths already encode their version, and
+    hashing them on every flow invocation would cost seconds for no invalidation benefit.
+
+    The lookahead is load-bearing: an INVOKED tool is followed by whitespace, whereas a directory
+    component of a path (`/scratch/timsim-demo/timsim-cli/target/release/...`) is followed by `/`.
+    Without it every command picked up `timsim-demo` and `timsim-cli` from the paths themselves.
+
+    Not covered: `timsim_eval`, invoked as `python -m`, whose identity is the venv rather than a
+    hashable file. Scoring changes still have to be handled by hand."""
+    names = sorted(set(re.findall(r"(?:^|[\s/])(timsim-[a-z0-9-]+)(?=\s)", template)))
+    if not names:
+        return template
+    ids = ",".join(f"{n}={_tool_sha(n)}" for n in names)
+    return f"{template}  # tools:{ids}"
+
+
+_necroflow_command = command
+
+
+def command(template, **kwargs):  # noqa: F811 — deliberate shadow of the necroflow import
+    """`necroflow.command`, with tool identity folded into the command template."""
+    if isinstance(template, str):
+        template = _stamp(template)
+    return _necroflow_command(template, **kwargs)
 
 
 # Noise is passed to the render as INDIVIDUAL value placeholders (see the render nodes) — never as one
