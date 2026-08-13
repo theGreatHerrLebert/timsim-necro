@@ -415,8 +415,35 @@ def _tool_sha(name: str) -> str:
     return _TOOL_SHA[name]
 
 
+_TOOL_NAME = re.compile(r"^timsim(?:-[a-z0-9-]+)?$")
+
+
+def _invoked_tools(template: str) -> list[str]:
+    """Names of timsim tools this template actually INVOKES (command position only)."""
+    found = []
+    for segment in re.split(r"&&|\|\||[;|]", template):
+        for token in segment.split():
+            # Skip leading `VAR=value` assignments, which precede the command in several rules.
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", token):
+                continue
+            name = token.rsplit("/", 1)[-1]
+            if _TOOL_NAME.match(name):
+                found.append(name)
+            break  # only the first real token of a segment is the command
+    return found
+
+
 def _stamp(template: str) -> str:
-    """Append `# tools:<name>=<sha>,...` for every timsim binary named in the template.
+    """Append `# tools:<name>=<sha>,...` for every timsim tool named in the template.
+
+    The suffix is OPTIONAL: the v1 measurement rule invokes the executable as bare `timsim`
+    (`mkdir -p {raw} && timsim {config} ...`), and requiring the hyphen silently left that rule --
+    the one that produces v1 reference data -- unstamped.
+
+    Only tokens in COMMAND POSITION count. Matching anywhere in the template cannot tell an invoked
+    path from a path passed as an argument: `cd /scratch/timsim-demo/timsim-cli && ls` would stamp
+    `timsim-cli`, which is a directory, not a tool. So the template is split on shell separators and
+    only the first real token of each segment is considered.
 
     A trailing `#` comment is inert in the shell but IS part of the command string necroflow hashes,
     so a rebuilt binary now yields a different fingerprint. Only `timsim-*` tools are stamped —
@@ -429,7 +456,7 @@ def _stamp(template: str) -> str:
 
     Not covered: `timsim_eval`, invoked as `python -m`, whose identity is the venv rather than a
     hashable file. Scoring changes still have to be handled by hand."""
-    names = sorted(set(re.findall(r"(?:^|[\s/])(timsim-[a-z0-9-]+)(?=\s)", template)))
+    names = sorted(set(_invoked_tools(template)))
     if not names:
         return template
     ids = ",".join(f"{n}={_tool_sha(n)}" for n in names)
@@ -1484,7 +1511,13 @@ def timsim_bruker_v2_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
             # no synthetic), search it, and subtract its IDs. The control reuses the render/search nodes —
             # a distinct command (adds `--noise-only`) → a separate content-addressed node.
             P.raw_control, P.truth_control = do_render(cfg, sample_id, P, control=True)
-            P.diann_control = search_bruker(P, 
+            # The control must be searched the SAME WAY as the run it corrects, using `_search` and
+            # `_lib_kw` from above rather than hard-coding the library-free rule. Two reasons, and
+            # the first is correctness, not speed: its identifications are SUBTRACTED from the main
+            # run's, so if the control searches library-free while the run searches against a
+            # prebuilt library, the two ID sets are not comparable and the subtraction is unsound.
+            # Second, it was also rebuilding the multi-GB predicted library on every arm.
+            P.diann_control = _search(P,
                 P.raw_control,
                 search_fasta=cfg.search_fasta,
                 qvalue=cfg.qvalue,
@@ -1492,6 +1525,7 @@ def timsim_bruker_v2_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
                 max_missed_cleavages=cfg.max_missed_cleavages,
                 min_length=cfg.min_length,
                 max_length=cfg.max_length,
+                **_lib_kw
             )
             P.score = score_bruker_bg(P, 
                 P.diann, P.diann_control, P.truth, P.peptides, qvalue=cfg.qvalue
@@ -1605,6 +1639,13 @@ def timsim_bruker_dda_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         precursors_every=cfg.dda_precursors_every,
         max_precursors=cfg.dda_max_precursors,
         exclusion_width=cfg.dda_exclusion_width,
+        # necroflow requires EVERY declared input at the call site; the Python defaults on
+        # `render_dda` do not satisfy it, and omitting these raised
+        # `TypeError: render_dda: missing required inputs` before the DAG was even built.
+        peak_shape=cfg.peak_shape,
+        cycle_seconds=cfg.cycle_seconds,
+        mobility_std_target=cfg.mobility_std_target,
+        n_sigma=cfg.n_sigma,
     )
     # ── phase 2 (opt-in): Sage-search the .d + score against the selection-event answer key ──
     if getattr(cfg, "search_fasta", None):
