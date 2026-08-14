@@ -1324,8 +1324,14 @@ def timsim_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
 
     P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
 
-    P.precursors = precursors(P, 
-        P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed
+    # `min_charge_contrib` is passed by all five other pipelines; this one was missed when the option
+    # was added, which left `timsim_pipeline` -- the v1 measurement path -- dead at DAG construction
+    # with `TypeError: precursors: missing required inputs`. Passing it also keeps this pipeline's
+    # structure fingerprint IDENTICAL to the v2 pipeline's, which is what allows a v1 and a v2 render
+    # in one tree to consume the very same peptides.
+    P.precursors = precursors(P,
+        P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed,
+        min_charge_contrib=cfg.min_charge_contrib
     )
     P.ccs = ccs(P, P.precursors, P.peptides)
     P.rt = rt(P, P.peptides)
@@ -1725,6 +1731,12 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--proteome-spec", default="hye.toml", help="multi-FASTA proteome spec")
     ap.add_argument("--mods", default="mods.toml", help="modification spec (e.g. mods_basic.toml for a light HeLa run)")
     ap.add_argument("--design-spec", default="design.toml", help="experiment design spec (e.g. design_hela.toml for a single-organism run)")
+    # The v1 measurement rule's TOML. Was hardcoded to "v1.toml", which made it impossible to drive a
+    # v1 run at settings other than the shared default -- notably `apply_fragmentation` and
+    # `use_reference_layout`, both of which must match the v2 render for a comparison to mean anything.
+    ap.add_argument("--timsim-config", default="v1.toml",
+                    help="v1 timsim TOML for the `simulate` rule (pass an ABSOLUTE path; the bare "
+                         "default resolves only from the configs directory)")
     # --- realism knobs (all default OFF, so nothing changes unless asked) -------------------
     ap.add_argument("--ion-count-noise", action="store_true",
                     help="Poisson counting statistics on the ANALYTE signal (distinct from "
@@ -1835,7 +1847,7 @@ def build_cfg(a) -> SimpleNamespace:
         charge_model="site-specific",
         design_spec=a.design_spec,
         digestion_efficiency=0.9,
-        timsim_config="v1.toml",
+        timsim_config=a.timsim_config,
         seed=41,
         template=a.thermo_template,
         frag_model=a.frag_model,

@@ -10,6 +10,12 @@ silent_mode = false
 
 [simulation]
 v2_total_events = 2.5e9
-apply_fragmentation = false
+# MUST stay true for anything compared against the v2 render, which ALWAYS projects MS2. With this
+# false, v1 writes MS1 only, and a "render comparison" silently compares v2's MS1+MS2 against v1's
+# MS1 alone. V1_V2_MAPPING.md:70 already required `true`; this file contradicted it. The real
+# v1-vs-v2 MS2 work (fragment-transfer bug, MS2/MS1 sum ratio 0.342 vs 0.375) was run OUTSIDE the
+# flow with fragmentation on, so those findings are unaffected -- but this default was a trap for
+# the next person to drive v1 through `timsim_pipeline`.
+apply_fragmentation = true
 v2_max_peptides = 2000
 use_reference_layout = false
