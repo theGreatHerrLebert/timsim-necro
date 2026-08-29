@@ -3,10 +3,27 @@ reference  = "A"
 load_ng    = 200
 seed       = 42
 n_proteins = 1200          # a simpler sample — a QUANTITY operation; the rest get amount 0
+# ABUNDANCE MARGINAL: log-normal, NOT the hockey stick. Changed 2026-08-29.
+#
+# `hockeystick` is `exp(-rank/decay) + tail` — an exponential head glued onto a CONSTANT ADDITIVE
+# FLOOR. With decay=0.06, tail=1e-4 the exponential drops below the floor at rank 0.553, so 45% of
+# proteins sit on a FLAT SHELF at one identical abundance. Measured consequence, censored to the
+# ~50k precursors a real run detects: p99/p50 = 6688 and a 743x swing across a 20x depth range,
+# against real Bruker Ultra2's 24.1 and 2.5x (LFQ Benchmark Gen Beta DIA-NN reports). The shelf also
+# distorts the recall-vs-LOAD curve, because raising load pushes the whole shelf across the
+# detection threshold at once instead of gradually.
+#
+# sigma = 1.5 (NATURAL-LOG units) is the best single compromise: p99/p50 21.5 (real 24.1), swing
+# 3.3x (real 2.5x), log10 sd 0.412 (real 0.554) — every statistic within ~30%, versus ~300x out.
+# The three targets do not converge on one sigma (they want 1.25 / 1.55 / 2.35), because real
+# abundance is log-normal in FAMILY but not exactly (skew +0.4): it has more overall spread with a
+# less extreme top than a log-normal at matching spread. Closing the last ~30% needs
+# `source = "table"` built from real data — which this crate documents as the only source that also
+# gets protein IDENTITY right.
 [abundance]
-HUMAN = { source = "hockeystick" }
-YEAST = { source = "hockeystick" }
-ECOLI = { source = "hockeystick" }
+HUMAN = { source = "lognormal", sigma = 1.5 }
+YEAST = { source = "lognormal", sigma = 1.5 }
+ECOLI = { source = "lognormal", sigma = 1.5 }
 [[condition]]
 name = "A"
 mix  = { HUMAN = 0.65, YEAST = 0.30, ECOLI = 0.05 }
