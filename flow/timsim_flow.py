@@ -759,6 +759,22 @@ def spectra(
     "--peptide-rt {peptide_rt} --ion-spectra {ion_spectra} --peptide-quantities {peptide_quantities} "
     "--sample {sample_id} --template {template} --intensity-scale {intensity_scale} "
     "--frag-model {frag_model} --method {method} --expected-ce {collision_energy} "
+    # The Thermo floor is inherited PER MS LEVEL, and the levels genuinely differ: a stock Exploris
+    # DIA run censors MS1 at 25,760 and MS2 at 575.5. `0` = inherit from the template.
+    #
+    # SUPPLY BOTH `min_peak_intensity` AND `template_ms1_median` FOR A PURE-PROFILE TEMPLATE. Such a
+    # template exposes no stored centroids, so the renderer can only read the profile BASELINE,
+    # which is ~4 orders below the instrument's peak-reporting threshold; inheriting it under-censors
+    # the dim tail badly. The two values must come from the SAME domain -- mixing a centroid-domain
+    # floor with a profile-domain median calibrates onto the wrong axis.
+    #
+    # And FREEZE the resulting `intensity_scale` for a cohort (get it from `--calibrate-only`):
+    # re-estimating per arm lets a difference in sample composition be absorbed into a compensating
+    # rescale, which in a cohort with a planted differential partially cancels the very signal being
+    # measured. The constant is a property of the (template, design, digest depth) TRIPLE.
+    "--min-peak-intensity {min_peak_intensity} "
+    "--min-peak-intensity-ms2 {min_peak_intensity_ms2} "
+    "--template-ms1-median {template_ms1_median} "
     "--out {data_raw} --thermo-truth {truth} --manifest {manifest}",
     threads=2,
     ram="8Gi",
@@ -774,6 +790,9 @@ def render_thermo(
     frag_model: str,
     method: str,
     collision_energy: float,
+    min_peak_intensity: float = 0.0,
+    min_peak_intensity_ms2: float = 0.0,
+    template_ms1_median: float = 0.0,
 ):
     """MEASUREMENT: author the feature space into a real Thermo `.raw` template (no-IMS). One node per
     sample (via `peptide_quantities` + `sample_id`); restages when the template changes. Three co-outputs
@@ -1435,6 +1454,9 @@ def timsim_thermo_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
         frag_model=cfg.frag_model,
         method=getattr(cfg, "method", "DIA"),
         collision_energy=cfg.collision_energy,
+        min_peak_intensity=getattr(cfg, "min_peak_intensity", 0.0),
+        min_peak_intensity_ms2=getattr(cfg, "min_peak_intensity_ms2", 0.0),
+        template_ms1_median=getattr(cfg, "template_ms1_median", 0.0),
     )
     # ── phase 2 (opt-in): search the .raw + score against the answer key ──
     if getattr(cfg, "search_fasta", None):
@@ -1795,6 +1817,17 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--dda-precursors-every", type=int, default=10, help="DDA: MS1 survey every Nth frame")
     ap.add_argument("--dda-max-precursors", type=int, default=25, help="DDA: max precursors per MS2 (PASEF) frame")
     ap.add_argument("--dda-exclusion-width", type=int, default=25, help="DDA: dynamic-exclusion window (frames)")
+    ap.add_argument("--min-peak-intensity", type=float, default=0.0,
+                    help="Thermo MS1 reporting floor; 0 = inherit from the template. Supply "
+                         "explicitly (with --template-ms1-median, SAME domain) for a "
+                         "pure-profile template, which exposes no centroids to inherit from.")
+    ap.add_argument("--min-peak-intensity-ms2", type=float, default=0.0,
+                    help="Thermo MS2 floor; 0 = inherit. Genuinely different from MS1 -- a "
+                         "stock Exploris censors MS1 at 25,760 and MS2 at 575.5, and sharing "
+                         "one floor censors fragments ~45x too hard.")
+    ap.add_argument("--template-ms1-median", type=float, default=0.0,
+                    help="the target --intensity-scale 0 calibrates onto; 0 = measure it off "
+                         "the template.")
     ap.add_argument("--flyability", default="lognormal", choices=["lognormal", "uniform"],
                     help="ionisation-efficiency model. DOMINANT source of peptide-level spread: "
                          "measured log10 sd 0.880 at the default sigma, against real data's "
@@ -1886,6 +1919,9 @@ def build_cfg(a) -> SimpleNamespace:
         mobility_std_target=getattr(a, "mobility_std_target", 0.009),
         n_sigma=getattr(a, "n_sigma", 3.0),
         min_charge_contrib=getattr(a, "min_charge_contrib", 0.0),
+        min_peak_intensity=a.min_peak_intensity,
+        min_peak_intensity_ms2=a.min_peak_intensity_ms2,
+        template_ms1_median=a.template_ms1_median,
         flyability=a.flyability,
         flyability_median=a.flyability_median,
         flyability_sigma=a.flyability_sigma,
