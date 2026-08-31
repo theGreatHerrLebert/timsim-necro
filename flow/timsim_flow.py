@@ -571,10 +571,22 @@ def modify(peptides: Peptides, mods_spec: str, floor: float):
     # v1 drops charge states below a share of the charged mass (its dia-PASEF config uses 0.25);
     # v2 kept every state above zero, which renders precursors no instrument would record.
     # 0 = keep everything (v2's historical behaviour).
-    "--min-charge-contrib {min_charge_contrib}"
+    "--min-charge-contrib {min_charge_contrib} "
+    # Ionisation efficiency. NOT a cosmetic knob: measured on a full human digest the
+    # `ionization_propensity` it draws has log10 sd 0.880 — LARGER than the abundance spread and
+    # larger than real data's ENTIRE observed precursor spread (0.483, DIA-NN Ms1.Area, Bruker
+    # Ultra 2). It is the dominant source of peptide-level variation in the whole pipeline, so it
+    # has to be settable from a job config rather than left on a binary default.
+    #
+    # The binary defaults to sigma = 1.0 while claiming "v1's parameters" in its own doc comment;
+    # v1's `generate_normal_efficiency` uses std_log = 0.6 (log10). The median (1e-2) does match.
+    "--flyability {flyability} --flyability-median {flyability_median} "
+    "--flyability-sigma {flyability_sigma}"
 )
 def precursors(peptides: Peptides, modforms: Modforms, charge_model: str, seed: int,
-               min_charge_contrib: float = 0.0):
+               min_charge_contrib: float = 0.0,
+               flyability: str = "lognormal", flyability_median: float = 1e-2,
+               flyability_sigma: float = 1.0):
     """Modforms -> ions. STRUCTURE: m/z and isotope envelopes are properties of the molecule, so
     they are shared by every sample too."""
     precursors = output(Precursors)
@@ -1331,7 +1343,8 @@ def timsim_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     # in one tree to consume the very same peptides.
     P.precursors = precursors(P,
         P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed,
-        min_charge_contrib=cfg.min_charge_contrib
+        min_charge_contrib=cfg.min_charge_contrib,
+                             flyability=cfg.flyability, flyability_median=cfg.flyability_median, flyability_sigma=cfg.flyability_sigma
     )
     P.ccs = ccs(P, P.precursors, P.peptides)
     P.rt = rt(P, P.peptides)
@@ -1387,7 +1400,8 @@ def timsim_thermo_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     )
     P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
     P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed,
-                             min_charge_contrib=cfg.min_charge_contrib)
+                             min_charge_contrib=cfg.min_charge_contrib,
+                             flyability=cfg.flyability, flyability_median=cfg.flyability_median, flyability_sigma=cfg.flyability_sigma)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, design_spec=cfg.design_spec
@@ -1454,7 +1468,8 @@ def timsim_bruker_v2_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     )
     P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
     P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed,
-                             min_charge_contrib=cfg.min_charge_contrib)
+                             min_charge_contrib=cfg.min_charge_contrib,
+                             flyability=cfg.flyability, flyability_median=cfg.flyability_median, flyability_sigma=cfg.flyability_sigma)
     P.ccs = ccs(P, P.precursors, P.peptides)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
@@ -1558,7 +1573,8 @@ def timsim_hye_quant_pipeline(P: Pipeline, cfg, sample_ids) -> None:
     )
     P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
     P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed,
-                             min_charge_contrib=cfg.min_charge_contrib)
+                             min_charge_contrib=cfg.min_charge_contrib,
+                             flyability=cfg.flyability, flyability_median=cfg.flyability_median, flyability_sigma=cfg.flyability_sigma)
     P.ccs = ccs(P, P.precursors, P.peptides)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
@@ -1609,7 +1625,8 @@ def timsim_bruker_dda_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     )
     P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
     P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed,
-                             min_charge_contrib=cfg.min_charge_contrib)
+                             min_charge_contrib=cfg.min_charge_contrib,
+                             flyability=cfg.flyability, flyability_median=cfg.flyability_median, flyability_sigma=cfg.flyability_sigma)
     P.ccs = ccs(P, P.precursors, P.peptides)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
@@ -1675,7 +1692,8 @@ def timsim_sciex_pipeline(P: Pipeline, cfg, sample_id: str) -> None:
     )
     P.modforms, P.modifications = modify(P, P.peptides, mods_spec=cfg.mods, floor=cfg.floor)
     P.precursors = precursors(P, P.peptides, P.modforms, charge_model=cfg.charge_model, seed=cfg.seed,
-                             min_charge_contrib=cfg.min_charge_contrib)
+                             min_charge_contrib=cfg.min_charge_contrib,
+                             flyability=cfg.flyability, flyability_median=cfg.flyability_median, flyability_sigma=cfg.flyability_sigma)
     P.rt = rt(P, P.peptides)
     P.samples, P.runs, P.sample_run_map, P.protein_quantities = design(P, 
         P.proteome, design_spec=cfg.design_spec
@@ -1777,6 +1795,15 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--dda-precursors-every", type=int, default=10, help="DDA: MS1 survey every Nth frame")
     ap.add_argument("--dda-max-precursors", type=int, default=25, help="DDA: max precursors per MS2 (PASEF) frame")
     ap.add_argument("--dda-exclusion-width", type=int, default=25, help="DDA: dynamic-exclusion window (frames)")
+    ap.add_argument("--flyability", default="lognormal", choices=["lognormal", "uniform"],
+                    help="ionisation-efficiency model. DOMINANT source of peptide-level spread: "
+                         "measured log10 sd 0.880 at the default sigma, against real data's "
+                         "0.483 TOTAL observed precursor spread.")
+    ap.add_argument("--flyability-median", type=float, default=1e-2,
+                    help="matches v1 (10**-2).")
+    ap.add_argument("--flyability-sigma", type=float, default=1.0,
+                    help="log10 sd. The binary default of 1.0 claims v1 parity but v1 uses "
+                         "std_log=0.6; pass 0.6 for actual v1 parity.")
     ap.add_argument("--sciex", action="store_true", help="build the LEAN v2 SCIEX ZenoTOF SWATH -> open mzML "
                                                          "pipeline (timsim-render-sciex) — imspy-free, no .wiff")
     ap.add_argument("--sciex-gradient-s", type=float, default=1800.0, help="SCIEX SWATH gradient length (s)")
@@ -1859,6 +1886,9 @@ def build_cfg(a) -> SimpleNamespace:
         mobility_std_target=getattr(a, "mobility_std_target", 0.009),
         n_sigma=getattr(a, "n_sigma", 3.0),
         min_charge_contrib=getattr(a, "min_charge_contrib", 0.0),
+        flyability=a.flyability,
+        flyability_median=a.flyability_median,
+        flyability_sigma=a.flyability_sigma,
         speclib=getattr(a, "speclib", None),
         # A bare flag, so it is "" (absent) or "--ion-count-noise " (present).
         ion_count_noise=bool(getattr(a, "ion_count_noise", False)),
